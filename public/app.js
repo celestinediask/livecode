@@ -333,19 +333,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }, true);
 
-  // Selection Drag Interception
-  document.addEventListener('selectstart', (e) => {
-    if (isCopyDisabled && !isHost) {
-      const target = e.target;
-      if (target && (target.closest('#codeEditorArea') || target.closest('#codeTextarea') || target.closest('.editor-section'))) {
-        // Prevent selection if user tries to drag text out
-        if (e.buttons === 1) { // Primary click drag
-          e.preventDefault();
-        }
-      }
-    }
-  }, true);
-
   // Keyboard Shortcuts Prevention (Ctrl+C, Cmd+C, Ctrl+X, Cmd+X, Ctrl+V, Cmd+V)
   document.addEventListener('keydown', (e) => {
     const isCmdOrCtrl = e.ctrlKey || e.metaKey;
