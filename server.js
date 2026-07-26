@@ -1,0 +1,460 @@
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const path = require('path');
+const cors = require('cors');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST']
+  }
+});
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// In-memory Room Storage
+const rooms = new Map();
+
+// Helper to generate clean short IDs
+function generateRoomId() {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < 6; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+// User color palette for collaborators
+const USER_COLORS = [
+  '#ff4a8d', '#00f0ff', '#7000ff', '#ffb703', '#06d6a0', 
+  '#ef476f', '#118ab2', '#ffd166', '#a06cd5', '#e76f51'
+];
+
+function getRandomColor() {
+  return USER_COLORS[Math.floor(Math.random() * USER_COLORS.length)];
+}
+
+// Starter code samples for different languages
+const DEFAULT_CODE = {
+  javascript: `// CodeSync Live - Real-time Collaborative Code Sharing
+// Try toggling "Disable Copying" in the header!
+
+function calculateFibonacci(n) {
+  if (n <= 1) return n;
+  let a = 0, b = 1;
+  for (let i = 2; i <= n; i++) {
+    let temp = a + b;
+    a = b;
+    b = temp;
+  }
+  return b;
+}
+
+console.log("Fibonacci(10):", calculateFibonacci(10));
+console.log("🚀 Server synchronized & live!");`,
+
+  python: `# CodeSync Live - Python Example
+def is_prime(n):
+    if n <= 1:
+        return False
+    for i in range(2, int(n**0.5) + 1):
+        if n % i == 0:
+            return False
+    return True
+
+primes = [x for x in range(1, 50) if is_prime(x)]
+print("Primes up to 50:", primes)`,
+
+  html: `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Live Code Preview</title>
+  <style>
+    body { font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; text-align: center; }
+    .card { background: #1e293b; padding: 20px; border-radius: 12px; border: 1px solid #334155; }
+    h1 { color: #38bdf8; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Hello from CodeSync! ⚡</h1>
+    <p>Real-time sharing with copy-paste protection.</p>
+  </div>
+</body>
+</html>`,
+
+  cpp: `// C++ Example
+#include <iostream>
+#include <vector>
+#include <numeric>
+
+int main() {
+    std::vector<int> nums = {10, 20, 30, 40, 50};
+    int sum = std::accumulate(nums.begin(), nums.end(), 0);
+    std::cout << "Sum of elements: " << sum << std::endl;
+    return 0;
+}`,
+
+  sql: `-- SQL Query Example
+SELECT 
+    users.id, 
+    users.username, 
+    COUNT(sessions.id) AS total_sessions
+FROM users
+LEFT JOIN sessions ON users.id = sessions.user_id
+WHERE users.active = TRUE
+GROUP BY users.id, users.username
+ORDER BY total_sessions DESC;`
+};
+
+function getOrCreateRoom(roomId) {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, {
+      id: roomId,
+      title: `Session ${roomId.toUpperCase()}`,
+      code: DEFAULT_CODE.javascript,
+      language: 'javascript',
+      hostSocketId: null,
+      created: Date.now(),
+      settings: {
+        copyDisabled: true, // Default enabled protection
+        pasteDisabled: false,
+        readOnly: false,
+        locked: false
+      },
+      users: new Map(), // socketId -> User info
+      chat: [],
+      snapshots: []
+    });
+  }
+  return rooms.get(roomId);
+}
+
+// REST Endpoints
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', activeRooms: rooms.size });
+});
+
+app.post('/api/rooms', (req, res) => {
+  const roomId = generateRoomId();
+  const room = getOrCreateRoom(roomId);
+  if (req.body.language && DEFAULT_CODE[req.body.language]) {
+    room.language = req.body.language;
+    room.code = DEFAULT_CODE[req.body.language];
+  }
+  if (typeof req.body.copyDisabled === 'boolean') {
+    room.settings.copyDisabled = req.body.copyDisabled;
+  }
+  res.json({ roomId, roomUrl: `/room/${roomId}` });
+});
+
+app.get('/api/rooms/:roomId', (req, res) => {
+  const roomId = req.params.roomId;
+  if (!rooms.has(roomId)) {
+    return res.status(404).json({ error: 'Room not found' });
+  }
+  const room = rooms.get(roomId);
+  res.json({
+    id: room.id,
+    title: room.title,
+    language: room.language,
+    settings: room.settings,
+    userCount: room.users.size,
+    created: room.created
+  });
+});
+
+// Serve frontend for /room/:id routes
+app.get('/room/:roomId', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Socket.io Real-time Event Handling
+io.on('connection', (socket) => {
+  let currentRoomId = null;
+  let currentUser = null;
+
+  // Join Room
+  socket.on('join-room', ({ roomId, username }) => {
+    const cleanRoomId = (roomId || 'default').toLowerCase();
+    const room = getOrCreateRoom(cleanRoomId);
+
+    if (room.settings.locked && room.users.size > 0) {
+      socket.emit('room-error', { message: 'This room is currently locked by the host.' });
+      return;
+    }
+
+    currentRoomId = cleanRoomId;
+    socket.join(cleanRoomId);
+
+    // Assign host if first user
+    const isHost = room.users.size === 0 || room.hostSocketId === null || room.hostSocketId === socket.id;
+    if (isHost) {
+      room.hostSocketId = socket.id;
+    }
+
+    currentUser = {
+      id: socket.id,
+      name: username || `User-${socket.id.substring(0, 4)}`,
+      color: getRandomColor(),
+      isHost: room.hostSocketId === socket.id,
+      cursor: { line: 1, ch: 1 },
+      joinedAt: Date.now()
+    };
+
+    room.users.set(socket.id, currentUser);
+
+    // Send initial room state to joining user
+    socket.emit('room-state', {
+      roomId: room.id,
+      code: room.code,
+      language: room.language,
+      settings: room.settings,
+      currentUser: currentUser,
+      isHost: currentUser.isHost,
+      users: Array.from(room.users.values()),
+      chat: room.chat,
+      snapshots: room.snapshots.map(s => ({ id: s.id, timestamp: s.timestamp, label: s.label }))
+    });
+
+    // Notify room of new user
+    io.to(cleanRoomId).emit('users-update', {
+      users: Array.from(room.users.values())
+    });
+
+    // Send system message in chat
+    const sysMessage = {
+      id: Date.now().toString(),
+      sender: 'System',
+      text: `${currentUser.name} joined the room.`,
+      isSystem: true,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    room.chat.push(sysMessage);
+    io.to(cleanRoomId).emit('chat-message', sysMessage);
+  });
+
+  // Code Change Sync
+  socket.on('code-change', ({ code, cursor }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+
+    // If read-only mode is active and user is not host
+    if (room.settings.readOnly && room.hostSocketId !== socket.id) {
+      socket.emit('protection-alert', { message: 'Room is currently in Read-Only mode.' });
+      return;
+    }
+
+    room.code = code;
+    if (currentUser && cursor) {
+      currentUser.cursor = cursor;
+    }
+
+    // Broadcast updated code to other users in room
+    socket.to(currentRoomId).emit('code-update', {
+      code: code,
+      senderId: socket.id,
+      cursor: cursor
+    });
+  });
+
+  // Cursor position updates
+  socket.on('cursor-change', (cursor) => {
+    if (!currentRoomId || !currentUser || !rooms.has(currentRoomId)) return;
+    currentUser.cursor = cursor;
+    socket.to(currentRoomId).emit('cursor-update', {
+      userId: socket.id,
+      cursor: cursor
+    });
+  });
+
+  // Language Change Sync
+  socket.on('language-change', ({ language }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    room.language = language;
+
+    // Default snippet if empty or template
+    if (DEFAULT_CODE[language] && (room.code === '' || Object.values(DEFAULT_CODE).includes(room.code))) {
+      room.code = DEFAULT_CODE[language];
+      io.to(currentRoomId).emit('code-update', { code: room.code, senderId: null });
+    }
+
+    io.to(currentRoomId).emit('language-update', { language });
+
+    const sysMessage = {
+      id: Date.now().toString(),
+      sender: 'System',
+      text: `Language changed to ${language.toUpperCase()} by ${currentUser ? currentUser.name : 'user'}.`,
+      isSystem: true,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    room.chat.push(sysMessage);
+    io.to(currentRoomId).emit('chat-message', sysMessage);
+  });
+
+  // Security & Protection Settings Toggle (Copy / Paste / ReadOnly / Lock)
+  socket.on('update-settings', (newSettings) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+
+    // Merge settings
+    room.settings = { ...room.settings, ...newSettings };
+
+    // Broadcast settings update to everyone in room
+    io.to(currentRoomId).emit('settings-update', {
+      settings: room.settings,
+      updatedBy: currentUser ? currentUser.name : 'Host'
+    });
+
+    // Notify in chat of security toggle
+    let changeDesc = [];
+    if (newSettings.copyDisabled !== undefined) {
+      changeDesc.push(`Copy protection ${newSettings.copyDisabled ? 'ENABLED 🔒' : 'DISABLED 🔓'}`);
+    }
+    if (newSettings.pasteDisabled !== undefined) {
+      changeDesc.push(`Paste protection ${newSettings.pasteDisabled ? 'ENABLED 🚫' : 'DISABLED 🔓'}`);
+    }
+    if (newSettings.readOnly !== undefined) {
+      changeDesc.push(`Read-only mode ${newSettings.readOnly ? 'ENABLED 👁️' : 'DISABLED ✏️'}`);
+    }
+
+    if (changeDesc.length > 0) {
+      const sysMsg = {
+        id: Date.now().toString(),
+        sender: 'Security',
+        text: `Security update: ${changeDesc.join(', ')}`,
+        isSystem: true,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+      room.chat.push(sysMsg);
+      io.to(currentRoomId).emit('chat-message', sysMsg);
+    }
+  });
+
+  // Copy Violation Report (When user attempts to copy while copy protection is enabled)
+  socket.on('copy-violation-attempt', ({ type }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    
+    // Broadcast notification or log attempt if desired
+    const noticeMsg = {
+      id: Date.now().toString(),
+      sender: 'Security Shield',
+      text: `⚠️ Copy attempt blocked for user ${currentUser ? currentUser.name : 'Unknown'}.`,
+      isSystem: true,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    // Emit to host only or all users for audit
+    socket.emit('protection-alert', { message: 'Copying code is disabled in this room by the owner.' });
+  });
+
+  // Chat message
+  socket.on('send-chat', ({ text }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId) || !text.trim()) return;
+    const room = rooms.get(currentRoomId);
+    const msg = {
+      id: Date.now().toString(),
+      sender: currentUser ? currentUser.name : 'User',
+      color: currentUser ? currentUser.color : '#ff4a8d',
+      text: text.trim(),
+      isSystem: false,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    room.chat.push(msg);
+    // Keep last 100 messages
+    if (room.chat.length > 100) room.chat.shift();
+    io.to(currentRoomId).emit('chat-message', msg);
+  });
+
+  // Create Snapshot
+  socket.on('create-snapshot', ({ label }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    const snapshot = {
+      id: Date.now().toString(),
+      timestamp: new Date().toLocaleTimeString(),
+      label: label || `Snapshot ${room.snapshots.length + 1}`,
+      code: room.code,
+      language: room.language,
+      author: currentUser ? currentUser.name : 'Anonymous'
+    };
+    room.snapshots.push(snapshot);
+    io.to(currentRoomId).emit('snapshot-created', snapshot);
+  });
+
+  // Restore Snapshot
+  socket.on('restore-snapshot', ({ snapshotId }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    const snap = room.snapshots.find(s => s.id === snapshotId);
+    if (snap) {
+      room.code = snap.code;
+      room.language = snap.language;
+      io.to(currentRoomId).emit('code-update', { code: room.code, senderId: null });
+      io.to(currentRoomId).emit('language-update', { language: room.language });
+    }
+  });
+
+  // Disconnect
+  socket.on('disconnect', () => {
+    if (currentRoomId && rooms.has(currentRoomId)) {
+      const room = rooms.get(currentRoomId);
+      room.users.delete(socket.id);
+
+      // Reassign host if host left
+      if (room.hostSocketId === socket.id) {
+        const remainingUsers = Array.from(room.users.values());
+        if (remainingUsers.length > 0) {
+          room.hostSocketId = remainingUsers[0].id;
+          remainingUsers[0].isHost = true;
+          io.to(remainingUsers[0].id).emit('host-assigned', { isHost: true });
+        } else {
+          room.hostSocketId = null;
+        }
+      }
+
+      // If room is empty, set cleanup timer (1 hour)
+      if (room.users.size === 0) {
+        setTimeout(() => {
+          if (rooms.has(currentRoomId) && rooms.get(currentRoomId).users.size === 0) {
+            rooms.delete(currentRoomId);
+          }
+        }, 3600000);
+      } else {
+        io.to(currentRoomId).emit('users-update', {
+          users: Array.from(room.users.values())
+        });
+        if (currentUser) {
+          const sysMsg = {
+            id: Date.now().toString(),
+            sender: 'System',
+            text: `${currentUser.name} left the room.`,
+            isSystem: true,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          };
+          room.chat.push(sysMsg);
+          io.to(currentRoomId).emit('chat-message', sysMsg);
+        }
+      }
+    }
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`⚡ CodeSync Live Service running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
+
