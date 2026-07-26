@@ -211,9 +211,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Apply Copy Protection CSS classes & Banners
     if (isCopyDisabled) {
       document.body.classList.add('copy-disabled');
+      codeTextarea.setAttribute('draggable', 'false');
       protectionBanner.classList.remove('hidden');
     } else {
       document.body.classList.remove('copy-disabled');
+      codeTextarea.removeAttribute('draggable');
       protectionBanner.classList.add('hidden');
     }
 
@@ -304,6 +306,46 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }, true);
 
+  // Drag-and-Drop Text Prevention Listener (Prevents selecting & dragging text out of editor)
+  document.addEventListener('dragstart', (e) => {
+    if (isCopyDisabled) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) {
+        e.dataTransfer.clearData();
+      }
+      showToast('⚠️ Dragging text is disabled while copy protection is active!', 'warning');
+      socket.emit('copy-violation-attempt', { type: 'dragstart-attempt' });
+    }
+  }, true);
+
+  document.addEventListener('drag', (e) => {
+    if (isCopyDisabled) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true);
+
+  document.addEventListener('drop', (e) => {
+    if (isCopyDisabled) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true);
+
+  // Selection Drag Interception
+  document.addEventListener('selectstart', (e) => {
+    if (isCopyDisabled && !isHost) {
+      const target = e.target;
+      if (target && (target.closest('#codeEditorArea') || target.closest('#codeTextarea') || target.closest('.editor-section'))) {
+        // Prevent selection if user tries to drag text out
+        if (e.buttons === 1) { // Primary click drag
+          e.preventDefault();
+        }
+      }
+    }
+  }, true);
+
   // Keyboard Shortcuts Prevention (Ctrl+C, Cmd+C, Ctrl+X, Cmd+X, Ctrl+V, Cmd+V)
   document.addEventListener('keydown', (e) => {
     const isCmdOrCtrl = e.ctrlKey || e.metaKey;
@@ -348,13 +390,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }, true);
 
-  // Context Menu Interception on Editor Area
-  codeTextarea.addEventListener('contextmenu', (e) => {
+  // Context Menu Interception on Document / Editor Area
+  document.addEventListener('contextmenu', (e) => {
     if (isCopyDisabled) {
-      e.preventDefault();
-      showToast('⚠️ Context menu disabled to prevent copying.', 'warning');
+      const target = e.target;
+      if (target && (target.closest('#codeEditorArea') || target.closest('#codeTextarea') || target.closest('.editor-section'))) {
+        e.preventDefault();
+        e.stopPropagation();
+        showToast('⚠️ Context menu disabled to prevent copying.', 'warning');
+      }
     }
-  });
+  }, true);
 
   // --------------------------------------------------------------------------
   // 4. Editor Highlighting & Real-Time Sync Logic

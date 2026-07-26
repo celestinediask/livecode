@@ -670,6 +670,7 @@ body {
    STRICT COPY PROTECTION & SELECTION DISABLE STYLES
    ========================================================================== */
 
+body.copy-disabled *,
 body.copy-disabled .editor-wrapper,
 body.copy-disabled #codeEditorArea,
 body.copy-disabled #codeTextarea,
@@ -678,11 +679,13 @@ body.copy-disabled .highlight-layer {
   -moz-user-select: none !important;
   -ms-user-select: none !important;
   user-select: none !important;
+  -webkit-user-drag: none !important;
+  user-drag: none !important;
 }
 
 body.copy-disabled #codeTextarea::selection {
-  background: rgba(244, 63, 94, 0.25) !important;
-  color: #f8fafc !important;
+  background: transparent !important;
+  color: inherit !important;
 }
 
 /* Watermark Overlay */
