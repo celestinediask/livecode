@@ -338,6 +338,38 @@ body {
   font-size: 0.8rem;
 }
 .btn-text:hover { color: var(--text-primary); }
+.btn-text:disabled {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
+  filter: grayscale(1);
+}
+
+.btn-icon-sm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+.btn-icon-sm:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.btn-danger {
+  background: #f43f5e !important;
+  color: #ffffff !important;
+  border-color: #e11d48 !important;
+  box-shadow: 0 0 10px rgba(244, 63, 94, 0.4) !important;
+}
+
+.btn-text-danger {
+  color: #f43f5e !important;
+  font-weight: 600;
+}
+.btn-text-danger:hover:not(:disabled) {
+  color: #fb7185 !important;
+}
 
 /* ==========================================================================
    Workspace & Code Editor Layout
@@ -773,6 +805,44 @@ body.read-only-mode #codeTextarea {
 
 .output-title { display: flex; align-items: center; gap: 0.4rem; }
 
+.output-status-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 9999px;
+  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.2;
+}
+
+.output-status-badge.hidden { display: none; }
+
+.output-status-badge.running {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  animation: status-pulse-glow 1.5s infinite ease-in-out;
+}
+
+.output-status-badge.completed {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.output-status-badge.error {
+  background: rgba(244, 63, 94, 0.15);
+  color: #f43f5e;
+  border: 1px solid rgba(244, 63, 94, 0.35);
+}
+
+@keyframes status-pulse-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .output-body {
   flex: 1;
   padding: 0.5rem 0.75rem;
@@ -785,6 +855,7 @@ body.read-only-mode #codeTextarea {
 .console-line.system { color: var(--accent-cyan); }
 .console-line.error { color: var(--accent-rose); }
 .console-line.warn { color: var(--accent-amber); }
+.console-line.success { color: #10b981; font-weight: 600; }
 
 .html-preview-container {
   flex: 1;

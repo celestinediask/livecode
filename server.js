@@ -40,26 +40,9 @@ function getRandomColor() {
   return USER_COLORS[Math.floor(Math.random() * USER_COLORS.length)];
 }
 
-// Starter code samples for different languages
+// Starter code sample for Python
 const DEFAULT_CODE = {
-  javascript: `// CodeSync Live - Real-time Collaborative Code Sharing
-// Try toggling "Disable Copying" in the header!
-
-function calculateFibonacci(n) {
-  if (n <= 1) return n;
-  let a = 0, b = 1;
-  for (let i = 2; i <= n; i++) {
-    let temp = a + b;
-    a = b;
-    b = temp;
-  }
-  return b;
-}
-
-console.log("Fibonacci(10):", calculateFibonacci(10));
-console.log("🚀 Server synchronized & live!");`,
-
-  python: `# CodeSync Live - Python Example
+  python: `# CodeSync Live - Python Workspace
 def is_prime(n):
     if n <= 1:
         return False
@@ -69,49 +52,8 @@ def is_prime(n):
     return True
 
 primes = [x for x in range(1, 50) if is_prime(x)]
-print("Primes up to 50:", primes)`,
-
-  html: `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Live Code Preview</title>
-  <style>
-    body { font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; text-align: center; }
-    .card { background: #1e293b; padding: 20px; border-radius: 12px; border: 1px solid #334155; }
-    h1 { color: #38bdf8; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>Hello from CodeSync! ⚡</h1>
-    <p>Real-time sharing with copy-paste protection.</p>
-  </div>
-</body>
-</html>`,
-
-  cpp: `// C++ Example
-#include <iostream>
-#include <vector>
-#include <numeric>
-
-int main() {
-    std::vector<int> nums = {10, 20, 30, 40, 50};
-    int sum = std::accumulate(nums.begin(), nums.end(), 0);
-    std::cout << "Sum of elements: " << sum << std::endl;
-    return 0;
-}`,
-
-  sql: `-- SQL Query Example
-SELECT 
-    users.id, 
-    users.username, 
-    COUNT(sessions.id) AS total_sessions
-FROM users
-LEFT JOIN sessions ON users.id = sessions.user_id
-WHERE users.active = TRUE
-GROUP BY users.id, users.username
-ORDER BY total_sessions DESC;`
+print("Primes up to 50:", primes)
+print("🚀 Live Python Workspace synchronized!")`
 };
 
 function getOrCreateRoom(roomId) {
@@ -119,8 +61,8 @@ function getOrCreateRoom(roomId) {
     rooms.set(roomId, {
       id: roomId,
       title: `Session ${roomId.toUpperCase()}`,
-      code: DEFAULT_CODE.javascript,
-      language: 'javascript',
+      code: DEFAULT_CODE.python,
+      language: 'python',
       hostSocketId: null,
       created: Date.now(),
       settings: {
@@ -298,6 +240,16 @@ io.on('connection', (socket) => {
     };
     room.chat.push(sysMessage);
     io.to(currentRoomId).emit('chat-message', sysMessage);
+  });
+
+  // Real-Time Output Sync Listener
+  socket.on('output-sync', (data) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    socket.to(currentRoomId).emit('output-update', {
+      ...data,
+      senderId: socket.id,
+      senderName: currentUser ? currentUser.name : 'User'
+    });
   });
 
   // Security & Protection Settings Toggle (Copy / Paste / ReadOnly / Lock)

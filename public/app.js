@@ -16,7 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let isPasteDisabled = false;
   let isReadOnly = false;
   let roomCode = '';
-  let roomLanguage = 'javascript';
+  let roomLanguage = 'python';
   let usersList = [];
   let snapshotsList = [];
 
@@ -91,7 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          language: 'javascript',
+          language: 'python',
           copyDisabled: true
         })
       });
@@ -189,6 +189,41 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast(`Snapshot "${snapshot.label}" saved!`);
   });
 
+  const outputStatusBadge = document.getElementById('outputStatusBadge');
+
+  function updateOutputStatus(status, text, isRemote = false) {
+    if (!outputStatusBadge) return;
+    if (!status || status === 'hidden') {
+      outputStatusBadge.className = 'output-status-badge hidden';
+      outputStatusBadge.textContent = '';
+    } else {
+      outputStatusBadge.className = `output-status-badge ${status}`;
+      outputStatusBadge.textContent = text;
+    }
+
+    if (!isRemote) {
+      socket.emit('output-sync', { action: 'status', status: status, text: text });
+    }
+  }
+
+  socket.on('output-update', (data) => {
+    if (outputDrawer) outputDrawer.classList.remove('collapsed');
+    if (consoleOutput) consoleOutput.classList.remove('hidden');
+    if (htmlPreviewContainer) htmlPreviewContainer.classList.add('hidden');
+
+    if (data.action === 'clear') {
+      if (data.message) {
+        consoleOutput.innerHTML = `<div class="console-line system">${data.message}</div>`;
+      } else {
+        consoleOutput.innerHTML = '';
+      }
+    } else if (data.action === 'append') {
+      appendConsoleLine(data.type, data.text, true);
+    } else if (data.action === 'status') {
+      updateOutputStatus(data.status, data.text, true);
+    }
+  });
+
   // --------------------------------------------------------------------------
   // 3. Security & Copy/Paste Protection Engine
   // --------------------------------------------------------------------------
@@ -208,14 +243,18 @@ document.addEventListener('DOMContentLoaded', () => {
     togglePasteProtection.disabled = !isHost;
     toggleReadOnly.disabled = !isHost;
 
-    // Apply Copy Protection CSS classes & Banners
-    if (isCopyDisabled) {
+    // Apply Copy Protection CSS classes & Banners (Exempt Host)
+    if (isCopyDisabled && !isHost) {
       document.body.classList.add('copy-disabled');
       codeTextarea.setAttribute('draggable', 'false');
-      protectionBanner.classList.remove('hidden');
     } else {
       document.body.classList.remove('copy-disabled');
       codeTextarea.removeAttribute('draggable');
+    }
+    
+    if (isCopyDisabled) {
+      protectionBanner.classList.remove('hidden');
+    } else {
       protectionBanner.classList.add('hidden');
     }
 
@@ -274,9 +313,9 @@ document.addEventListener('DOMContentLoaded', () => {
     socket.emit('update-settings', { readOnly: toggleReadOnly.checked });
   });
 
-  // Strict Copy Prevention Listener
+  // Strict Copy Prevention Listener (Exempt Host)
   document.addEventListener('copy', (e) => {
-    if (isCopyDisabled) {
+    if (isCopyDisabled && !isHost) {
       e.preventDefault();
       e.stopPropagation();
       if (e.clipboardData) {
@@ -287,9 +326,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }, true);
 
-  // Cut Prevention Listener
+  // Cut Prevention Listener (Exempt Host)
   document.addEventListener('cut', (e) => {
-    if (isCopyDisabled) {
+    if (isCopyDisabled && !isHost) {
       e.preventDefault();
       e.stopPropagation();
       showToast('⚠️ Cut/Copy is disabled in this room!', 'warning');
@@ -297,18 +336,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }, true);
 
-  // Paste Prevention Listener
+  // Paste Prevention Listener (Exempt Host)
   document.addEventListener('paste', (e) => {
-    if (isPasteDisabled) {
+    if (isPasteDisabled && !isHost) {
       e.preventDefault();
       e.stopPropagation();
       showToast('⚠️ Pasting into editor is disabled in this room!', 'warning');
     }
   }, true);
 
-  // Drag-and-Drop Text Prevention Listener (Prevents selecting & dragging text out of editor)
+  // Drag-and-Drop Text Prevention Listener (Exempt Host)
   document.addEventListener('dragstart', (e) => {
-    if (isCopyDisabled) {
+    if (isCopyDisabled && !isHost) {
       e.preventDefault();
       e.stopPropagation();
       if (e.dataTransfer) {
@@ -320,26 +359,26 @@ document.addEventListener('DOMContentLoaded', () => {
   }, true);
 
   document.addEventListener('drag', (e) => {
-    if (isCopyDisabled) {
+    if (isCopyDisabled && !isHost) {
       e.preventDefault();
       e.stopPropagation();
     }
   }, true);
 
   document.addEventListener('drop', (e) => {
-    if (isCopyDisabled) {
+    if (isCopyDisabled && !isHost) {
       e.preventDefault();
       e.stopPropagation();
     }
   }, true);
 
-  // Keyboard Shortcuts Prevention (Ctrl+C, Cmd+C, Ctrl+X, Cmd+X, Ctrl+V, Cmd+V)
+  // Keyboard Shortcuts Prevention (Ctrl+C, Cmd+C, Ctrl+X, Cmd+X, Ctrl+V, Cmd+V - Exempt Host)
   document.addEventListener('keydown', (e) => {
     const isCmdOrCtrl = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
 
     // Prevent Copy
-    if (isCmdOrCtrl && (key === 'c' || key === 'insert') && isCopyDisabled) {
+    if (isCmdOrCtrl && (key === 'c' || key === 'insert') && isCopyDisabled && !isHost) {
       e.preventDefault();
       e.stopPropagation();
       showToast('⚠️ Clipboard Copy (Ctrl+C / Cmd+C) is disabled by room policy.', 'warning');
@@ -347,14 +386,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Prevent Cut
-    if (isCmdOrCtrl && key === 'x' && isCopyDisabled) {
+    if (isCmdOrCtrl && key === 'x' && isCopyDisabled && !isHost) {
       e.preventDefault();
       e.stopPropagation();
       showToast('⚠️ Cut (Ctrl+X / Cmd+X) is disabled by room policy.', 'warning');
     }
 
     // Prevent Paste
-    if (isCmdOrCtrl && (key === 'v' || (e.shiftKey && key === 'insert')) && isPasteDisabled) {
+    if (isCmdOrCtrl && (key === 'v' || (e.shiftKey && key === 'insert')) && isPasteDisabled && !isHost) {
       e.preventDefault();
       e.stopPropagation();
       showToast('⚠️ Paste is disabled in this room.', 'warning');
@@ -377,9 +416,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }, true);
 
-  // Context Menu Interception on Document / Editor Area
+  // Context Menu Interception on Document / Editor Area (Exempt Host)
   document.addEventListener('contextmenu', (e) => {
-    if (isCopyDisabled) {
+    if (isCopyDisabled && !isHost) {
       const target = e.target;
       if (target && (target.closest('#codeEditorArea') || target.closest('#codeTextarea') || target.closest('.editor-section'))) {
         e.preventDefault();
@@ -439,18 +478,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     lineNumbers.textContent = numbersHtml;
 
-    // 2. Syntax Highlighting via Prism
-    let prismLang = roomLanguage;
-    if (prismLang === 'html') prismLang = 'markup';
-    
-    highlightCode.className = `language-${prismLang}`;
+    // 2. Syntax Highlighting via Prism (Python)
+    highlightCode.className = 'language-python';
     let codeContent = codeTextarea.value;
     if (codeContent.endsWith('\n')) {
       codeContent += ' ';
     }
     highlightCode.textContent = codeContent;
     
-    if (window.Prism && Prism.languages[prismLang]) {
+    if (window.Prism && Prism.languages.python) {
       Prism.highlightElement(highlightCode);
     }
 
@@ -462,74 +498,194 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Language Change Listener
   languageSelect.addEventListener('change', () => {
-    roomLanguage = languageSelect.value;
+    roomLanguage = 'python';
     updateEditorDisplay();
     socket.emit('language-change', { language: roomLanguage });
   });
 
   // --------------------------------------------------------------------------
-  // 5. Code Execution Engine (Runner Console)
+  // 5. Code Execution Engine (Pyodide Persistent WebAssembly Worker Engine)
   // --------------------------------------------------------------------------
 
-  runCodeBtn.addEventListener('click', () => {
+  let activeExecutionWorker = null;
+  let isExecutionRunning = false;
+  const stopConsoleBtn = document.getElementById('stopConsoleBtn');
+
+  function createPyodideWorkerBlob() {
+    const workerScript = `
+      importScripts('https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js');
+      let pyodide = null;
+
+      self.onmessage = async function(e) {
+        const { type, code } = e.data;
+        if (type === 'init') {
+          if (!pyodide) {
+            try {
+              self.postMessage({ type: 'status', text: 'initializing' });
+              pyodide = await loadPyodide({
+                stdout: (text) => self.postMessage({ type: 'stdout', text: text }),
+                stderr: (text) => self.postMessage({ type: 'stderr', text: text })
+              });
+              self.postMessage({ type: 'status', text: 'ready' });
+            } catch (err) {
+              self.postMessage({ type: 'error', error: 'Failed to initialize Python engine.' });
+            }
+          }
+        } else if (type === 'run') {
+          try {
+            if (!pyodide) {
+              self.postMessage({ type: 'status', text: 'initializing' });
+              pyodide = await loadPyodide({
+                stdout: (text) => self.postMessage({ type: 'stdout', text: text }),
+                stderr: (text) => self.postMessage({ type: 'stderr', text: text })
+              });
+              self.postMessage({ type: 'status', text: 'ready' });
+            }
+            await pyodide.runPythonAsync(code);
+            self.postMessage({ type: 'done' });
+          } catch (err) {
+            self.postMessage({ type: 'error', error: err.message });
+          }
+        }
+      };
+    `;
+    const blob = new Blob([workerScript], { type: 'application/javascript' });
+    return URL.createObjectURL(blob);
+  }
+
+  const pyodideWorkerBlobUrl = createPyodideWorkerBlob();
+
+  function getOrInitWorker() {
+    if (!activeExecutionWorker) {
+      activeExecutionWorker = new Worker(pyodideWorkerBlobUrl);
+
+      activeExecutionWorker.onmessage = (e) => {
+        const { type, text, error } = e.data;
+        if (type === 'status') {
+          if (text === 'initializing' && isExecutionRunning) {
+            updateOutputStatus('running', 'Initializing...');
+          } else if (text === 'ready') {
+            if (!isExecutionRunning) updateOutputStatus('hidden');
+          }
+        } else if (type === 'stdout') {
+          appendConsoleLine('normal', text);
+        } else if (type === 'stderr') {
+          appendConsoleLine('error', text);
+        } else if (type === 'done') {
+          setRunningUIState(false);
+          updateOutputStatus('completed', '✔');
+        } else if (type === 'error') {
+          setRunningUIState(false);
+          updateOutputStatus('error', '❌ Error');
+          appendConsoleLine('error', `Python Traceback:\n${error}`);
+        }
+      };
+
+      activeExecutionWorker.onerror = (err) => {
+        setRunningUIState(false);
+        updateOutputStatus('error', '❌ Error');
+        appendConsoleLine('error', `Worker Error: ${err.message}`);
+      };
+
+      // Pre-warm Python runtime
+      activeExecutionWorker.postMessage({ type: 'init' });
+    }
+    return activeExecutionWorker;
+  }
+
+  // Pre-initialize Python WebAssembly worker in background on page load
+  setTimeout(() => {
+    getOrInitWorker();
+  }, 500);
+
+  function setRunningUIState(running) {
+    isExecutionRunning = running;
+
+    if (running) {
+      runCodeBtn.classList.add('btn-danger', 'is-running');
+      runCodeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"></rect></svg>';
+      runCodeBtn.title = 'Stop Execution ⏹';
+    } else {
+      runCodeBtn.classList.remove('btn-danger', 'is-running');
+      runCodeBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>';
+      runCodeBtn.title = 'Run Code';
+    }
+  }
+
+  function terminateExecution(reason = 'Execution terminated by user') {
+    if (activeExecutionWorker) {
+      activeExecutionWorker.terminate();
+      activeExecutionWorker = null;
+    }
+    setRunningUIState(false);
+    updateOutputStatus('error', '🛑 Stopped');
+    appendConsoleLine('error', `🛑 [${reason}]`);
+    showToast('🛑 Code execution terminated.');
+
+    // Pre-warm fresh worker for next run
+    getOrInitWorker();
+  }
+
+  function runPythonCode(codeToRun) {
+    if (isExecutionRunning) {
+      terminateExecution();
+      return;
+    }
+
     outputDrawer.classList.remove('collapsed');
     consoleOutput.innerHTML = '';
     htmlPreviewContainer.classList.add('hidden');
     consoleOutput.classList.remove('hidden');
 
-    const codeToRun = codeTextarea.value;
-    appendConsoleLine('system', `▶ Executing ${roomLanguage.toUpperCase()} code...`);
+    socket.emit('output-sync', { action: 'clear' });
+    updateOutputStatus('running', 'Running...');
+    setRunningUIState(true);
 
-    if (roomLanguage === 'javascript') {
-      try {
-        // Intercept console.log
-        const logs = [];
-        const customConsole = {
-          log: (...args) => logs.push(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ')),
-          error: (...args) => logs.push('❌ [Error] ' + args.join(' ')),
-          warn: (...args) => logs.push('⚠️ [Warn] ' + args.join(' '))
-        };
+    const worker = getOrInitWorker();
+    worker.postMessage({ type: 'run', code: codeToRun });
+  }
 
-        const runner = new Function('console', codeToRun);
-        runner(customConsole);
-
-        if (logs.length > 0) {
-          logs.forEach(l => appendConsoleLine('normal', l));
-        } else {
-          appendConsoleLine('system', 'Execution finished with no output.');
-        }
-      } catch (err) {
-        appendConsoleLine('error', `Runtime Error: ${err.message}`);
-      }
-    } else if (roomLanguage === 'html') {
-      consoleOutput.classList.add('hidden');
-      htmlPreviewContainer.classList.remove('hidden');
-      const doc = htmlPreviewFrame.contentDocument || htmlPreviewFrame.contentWindow.document;
-      doc.open();
-      doc.write(codeToRun);
-      doc.close();
-      showToast('HTML Output rendered live!');
+  runCodeBtn.addEventListener('click', () => {
+    if (isExecutionRunning) {
+      terminateExecution();
     } else {
-      // Simulated Output for C++, Python, SQL
-      appendConsoleLine('system', `[Simulated Runner for ${roomLanguage.toUpperCase()}]`);
-      appendConsoleLine('normal', `Output: Clean execution completed successfully (0 errors).`);
+      const codeToRun = codeTextarea.value;
+      runPythonCode(codeToRun);
     }
   });
 
-  function appendConsoleLine(type, text) {
+  function appendConsoleLine(type, text, isRemote = false) {
     const div = document.createElement('div');
     div.className = `console-line ${type}`;
     div.textContent = text;
     consoleOutput.appendChild(div);
     consoleOutput.scrollTop = consoleOutput.scrollHeight;
+
+    if (!isRemote) {
+      socket.emit('output-sync', { action: 'append', type: type, text: text });
+    }
+  }
+
+  const copyConsoleBtn = document.getElementById('copyConsoleBtn');
+  if (copyConsoleBtn) {
+    copyConsoleBtn.addEventListener('click', () => {
+      const outputText = consoleOutput.innerText || consoleOutput.textContent;
+      if (!outputText.trim()) {
+        showToast('Console output is empty.', 'warning');
+        return;
+      }
+      navigator.clipboard.writeText(outputText).then(() => {
+        showToast('📋 Console output copied to clipboard!');
+      }).catch(() => {
+        showToast('Failed to copy console output.', 'warning');
+      });
+    });
   }
 
   document.getElementById('clearConsoleBtn').addEventListener('click', () => {
     consoleOutput.innerHTML = '<div class="console-line system">[Cleared]</div>';
-  });
-
-  document.getElementById('closeConsoleBtn').addEventListener('click', () => {
-    outputDrawer.classList.add('collapsed');
+    updateOutputStatus('hidden');
+    socket.emit('output-sync', { action: 'clear', message: '[Cleared]' });
   });
 
   // --------------------------------------------------------------------------
