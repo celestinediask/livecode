@@ -252,6 +252,25 @@ io.on('connection', (socket) => {
     });
   });
 
+  // Execution Request Listeners (Routing execution requests to Room Host)
+  socket.on('request-run-code', ({ code }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (room.hostSocketId) {
+      io.to(room.hostSocketId).emit('execute-on-host', { code });
+    } else {
+      socket.emit('protection-alert', { message: 'Host is currently offline. Cannot execute code.' });
+    }
+  });
+
+  socket.on('request-terminate-code', () => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (room.hostSocketId) {
+      io.to(room.hostSocketId).emit('terminate-on-host');
+    }
+  });
+
   // Security & Protection Settings Toggle (Copy / Paste / ReadOnly / Lock)
   socket.on('update-settings', (newSettings) => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;

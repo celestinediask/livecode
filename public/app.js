@@ -125,6 +125,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     currentUser = state.currentUser;
     isHost = state.isHost;
+    if (isHost) {
+      getOrInitWorker();
+    }
 
     // Apply Room Settings
     applyProtectionSettings(state.settings);
@@ -172,7 +175,22 @@ document.addEventListener('DOMContentLoaded', () => {
     isHost = newIsHost;
     if (currentUser) currentUser.isHost = isHost;
     applyProtectionSettings({ copyDisabled: isCopyDisabled, pasteDisabled: isPasteDisabled, readOnly: isReadOnly });
+    if (isHost) {
+      getOrInitWorker();
+    }
     showToast('👑 You are now the Room Host! Security controls unlocked.');
+  });
+
+  socket.on('execute-on-host', ({ code }) => {
+    if (isHost) {
+      runPythonCode(code || codeTextarea.value);
+    }
+  });
+
+  socket.on('terminate-on-host', () => {
+    if (isHost && isExecutionRunning) {
+      terminateExecution();
+    }
   });
 
   socket.on('protection-alert', ({ message }) => {
@@ -196,9 +214,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!status || status === 'hidden') {
       outputStatusBadge.className = 'output-status-badge hidden';
       outputStatusBadge.textContent = '';
+      if (typeof setRunningUIState === 'function') setRunningUIState(false);
     } else {
       outputStatusBadge.className = `output-status-badge ${status}`;
       outputStatusBadge.textContent = text;
+      if (typeof setRunningUIState === 'function') {
+        if (status === 'running') {
+          setRunningUIState(true);
+        } else {
+          setRunningUIState(false);
+        }
+      }
     }
 
     if (!isRemote) {
@@ -556,6 +582,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const pyodideWorkerBlobUrl = createPyodideWorkerBlob();
 
   function getOrInitWorker() {
+    if (!isHost) return null;
     if (!activeExecutionWorker) {
       activeExecutionWorker = new Worker(pyodideWorkerBlobUrl);
 
@@ -593,9 +620,11 @@ document.addEventListener('DOMContentLoaded', () => {
     return activeExecutionWorker;
   }
 
-  // Pre-initialize Python WebAssembly worker in background on page load
+  // Pre-initialize Python WebAssembly worker in background on page load if Host
   setTimeout(() => {
-    getOrInitWorker();
+    if (isHost) {
+      getOrInitWorker();
+    }
   }, 500);
 
   function setRunningUIState(running) {
@@ -627,6 +656,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function runPythonCode(codeToRun) {
+    if (!isHost) return;
+
     if (isExecutionRunning) {
       terminateExecution();
       return;
@@ -642,15 +673,25 @@ document.addEventListener('DOMContentLoaded', () => {
     setRunningUIState(true);
 
     const worker = getOrInitWorker();
-    worker.postMessage({ type: 'run', code: codeToRun });
+    if (worker) {
+      worker.postMessage({ type: 'run', code: codeToRun });
+    }
   }
 
   runCodeBtn.addEventListener('click', () => {
-    if (isExecutionRunning) {
-      terminateExecution();
+    const codeToRun = codeTextarea.value;
+    if (isHost) {
+      if (isExecutionRunning) {
+        terminateExecution();
+      } else {
+        runPythonCode(codeToRun);
+      }
     } else {
-      const codeToRun = codeTextarea.value;
-      runPythonCode(codeToRun);
+      if (isExecutionRunning) {
+        socket.emit('request-terminate-code');
+      } else {
+        socket.emit('request-run-code', { code: codeToRun });
+      }
     }
   });
 
