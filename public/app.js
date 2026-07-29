@@ -1,9 +1,16 @@
 // ==========================================================================
-// CodeSync Live — Real-Time Client Application & Protection Engine
+// LiveCode — Real-Time Client Application & Protection Engine
 // ==========================================================================
 
 document.addEventListener('DOMContentLoaded', () => {
   const socket = io();
+
+  // Persistent Client Session Token (Maintains Host Identity on Browser Refresh)
+  let userToken = sessionStorage.getItem('livecode_user_token');
+  if (!userToken) {
+    userToken = 'usr_' + Math.random().toString(36).substring(2, 11) + Date.now().toString(36);
+    sessionStorage.setItem('livecode_user_token', userToken);
+  }
 
   // URL Parsing to extract Room ID
   const pathParts = window.location.pathname.split('/');
@@ -18,7 +25,10 @@ document.addEventListener('DOMContentLoaded', () => {
   let roomCode = '';
   let roomLanguage = 'python';
   let usersList = [];
-  let snapshotsList = [];
+  let isSyntaxHighlightEnabled = true;
+  let activeSelection = null;
+  let activeRestingCursorUserId = null;
+  const remoteCursors = new Map();
 
   // DOM Element References
   const displayRoomId = document.getElementById('displayRoomId');
@@ -34,11 +44,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const toggleCopyProtection = document.getElementById('toggleCopyProtection');
   const togglePasteProtection = document.getElementById('togglePasteProtection');
   const toggleReadOnly = document.getElementById('toggleReadOnly');
+  const toggleSyntaxHighlight = document.getElementById('toggleSyntaxHighlight');
   const copyProtectionToggleLabel = document.getElementById('copyProtectionToggleLabel');
 
   // Actions & Buttons
   const runCodeBtn = document.getElementById('runCodeBtn');
-  const snapshotBtn = document.getElementById('snapshotBtn');
   const downloadCodeBtn = document.getElementById('downloadCodeBtn');
   const copyCodeBtn = document.getElementById('copyCodeBtn');
   const toggleUsersBtn = document.getElementById('toggleUsersBtn');
@@ -55,7 +65,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Lists & Containers
   const userListContainer = document.getElementById('userListContainer');
-  const snapshotListContainer = document.getElementById('snapshotListContainer');
+  const collaboratorCursorsContainer = document.getElementById('collaboratorCursors');
+  const mousePointerContainer = document.getElementById('mousePointerContainer');
   const chatMessages = document.getElementById('chatMessages');
   const chatInput = document.getElementById('chatInput');
   const sendChatBtn = document.getElementById('sendChatBtn');
@@ -106,7 +117,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function joinRoom(roomId, username) {
     displayRoomId.textContent = roomId.toUpperCase();
-    socket.emit('join-room', { roomId, username });
+    socket.emit('join-room', { roomId, username, userToken });
   }
 
   // --------------------------------------------------------------------------
@@ -125,6 +136,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     currentUser = state.currentUser;
     isHost = state.isHost;
+    updateRoleBadge();
     if (isHost) {
       getOrInitWorker();
     }
@@ -134,46 +146,130 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Update Users & History
     usersList = state.users || [];
-    snapshotsList = state.snapshots || [];
     renderUsers();
-    renderSnapshots();
     renderChat(state.chat || []);
 
     // Initial Syntax Highlight & Line Count
     updateEditorDisplay();
   });
 
-  socket.on('code-update', ({ code, senderId }) => {
+  socket.on('settings-update', ({ settings, updatedBy }) => {
+    applyProtectionSettings(settings);
+  });
+
+  socket.on('code-update', ({ code, senderId, cursor }) => {
     if (senderId !== socket.id) {
       const cursorPos = codeTextarea.selectionStart;
       codeTextarea.value = code;
       roomCode = code;
-      // Preserve cursor position if possible
       codeTextarea.setSelectionRange(cursorPos, cursorPos);
       updateEditorDisplay();
+      if (senderId && cursor) {
+        const user = usersList.find(u => u.id === senderId);
+        if (user) {
+          activeRestingCursorUserId = senderId;
+          user.cursor = cursor;
+          remoteCursors.set(senderId, { cursor: cursor, name: user.name, color: user.color, isInsideEditor: true });
+          renderUsers();
+          renderCollaboratorCursors();
+        }
+      }
     }
-  });
-
-  socket.on('language-update', ({ language }) => {
-    roomLanguage = language;
-    languageSelect.value = language;
-    updateEditorDisplay();
-    showToast(`Language updated to ${language.toUpperCase()}`);
-  });
-
-  socket.on('settings-update', ({ settings, updatedBy }) => {
-    applyProtectionSettings(settings);
-    showToast(`Security settings updated by ${updatedBy}`);
   });
 
   socket.on('users-update', ({ users }) => {
     usersList = users;
+    const currentIds = new Set(users.map(u => u.id));
+    for (let id of remoteCursors.keys()) {
+      if (!currentIds.has(id)) {
+        remoteCursors.delete(id);
+      }
+    }
+    if (activeSelection && !currentIds.has(activeSelection.userId)) {
+      activeSelection = null;
+    }
+    users.forEach(u => {
+      if (u.id !== socket.id && u.cursor) {
+        if (!remoteCursors.has(u.id)) {
+          remoteCursors.set(u.id, { cursor: u.cursor, name: u.name, color: u.color });
+        } else {
+          const existing = remoteCursors.get(u.id);
+          existing.name = u.name;
+          existing.color = u.color;
+        }
+      }
+    });
     renderUsers();
+    renderCollaboratorCursors();
+  });
+
+  socket.on('cursor-update', ({ userId, cursor }) => {
+    const user = usersList.find(u => u.id === userId);
+    if (user) {
+      activeRestingCursorUserId = userId;
+      user.cursor = cursor;
+      remoteCursors.set(userId, { cursor: cursor, name: user.name, color: user.color, isInsideEditor: true });
+
+      if (cursor.selection && cursor.selection.start < cursor.selection.end) {
+        activeSelection = {
+          userId: userId,
+          start: cursor.selection.start,
+          end: cursor.selection.end,
+          color: user.color
+        };
+      } else if (!cursor.selection || cursor.selection.start === cursor.selection.end) {
+        if (activeSelection && activeSelection.userId === userId) {
+          activeSelection = null;
+        }
+      }
+      renderUsers();
+      renderCollaboratorCursors();
+    }
+  });
+
+  socket.on('mouse-update', ({ userId, x, y }) => {
+    if (userId === socket.id) return;
+    const user = usersList.find(u => u.id === userId);
+    if (user) {
+      activeRestingCursorUserId = userId;
+      const inside = isPosInsideElement(x, y, 'codeEditorArea');
+      const existing = remoteCursors.get(userId) || { cursor: user.cursor, name: user.name, color: user.color };
+      existing.mouseX = x;
+      existing.mouseY = y;
+      existing.isInsideEditor = inside;
+      existing.lastMouseMove = Date.now();
+      remoteCursors.set(userId, existing);
+      renderCollaboratorCursors();
+    }
+  });
+
+  socket.on('scroll-update', ({ userId, top, left }) => {
+    if (userId === socket.id) return;
+    isRemoteScroll = true;
+    codeTextarea.scrollTop = top;
+    codeTextarea.scrollLeft = left;
+    
+    // Update visual layers immediately
+    highlightCode.parentElement.scrollTop = top;
+    highlightCode.parentElement.scrollLeft = left;
+    lineNumbers.scrollTop = top;
+    renderCollaboratorCursors();
+    
+    // Reset flag after browser processes the scroll event
+    setTimeout(() => { isRemoteScroll = false; }, 50);
+  });
+
+  socket.on('output-scroll-update', ({ userId, top }) => {
+    if (userId === socket.id || !consoleOutput) return;
+    isRemoteOutputScroll = true;
+    consoleOutput.scrollTop = top;
+    setTimeout(() => { isRemoteOutputScroll = false; }, 50);
   });
 
   socket.on('host-assigned', ({ isHost: newIsHost }) => {
     isHost = newIsHost;
     if (currentUser) currentUser.isHost = isHost;
+    updateRoleBadge();
     applyProtectionSettings({ copyDisabled: isCopyDisabled, pasteDisabled: isPasteDisabled, readOnly: isReadOnly });
     if (isHost) {
       getOrInitWorker();
@@ -199,12 +295,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   socket.on('chat-message', (msg) => {
     appendChatMessage(msg);
-  });
-
-  socket.on('snapshot-created', (snapshot) => {
-    snapshotsList.push(snapshot);
-    renderSnapshots();
-    showToast(`Snapshot "${snapshot.label}" saved!`);
   });
 
   const outputStatusBadge = document.getElementById('outputStatusBadge');
@@ -258,16 +348,26 @@ document.addEventListener('DOMContentLoaded', () => {
     if (settings.copyDisabled !== undefined) isCopyDisabled = settings.copyDisabled;
     if (settings.pasteDisabled !== undefined) isPasteDisabled = settings.pasteDisabled;
     if (settings.readOnly !== undefined) isReadOnly = settings.readOnly;
+    if (settings.syntaxHighlight !== undefined) {
+      isSyntaxHighlightEnabled = settings.syntaxHighlight;
+      updateEditorDisplay();
+    }
 
     // Update UI toggle states
     toggleCopyProtection.checked = isCopyDisabled;
     togglePasteProtection.checked = isPasteDisabled;
     toggleReadOnly.checked = isReadOnly;
+    if (toggleSyntaxHighlight) {
+      toggleSyntaxHighlight.checked = isSyntaxHighlightEnabled;
+    }
 
     // Control permission for non-hosts (disable switches if not host)
     toggleCopyProtection.disabled = !isHost;
     togglePasteProtection.disabled = !isHost;
     toggleReadOnly.disabled = !isHost;
+    if (toggleSyntaxHighlight) {
+      toggleSyntaxHighlight.disabled = !isHost;
+    }
 
     // Apply Copy Protection CSS classes & Banners (Exempt Host)
     if (isCopyDisabled && !isHost) {
@@ -338,6 +438,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!isHost) return;
     socket.emit('update-settings', { readOnly: toggleReadOnly.checked });
   });
+
+  if (toggleSyntaxHighlight) {
+    toggleSyntaxHighlight.addEventListener('change', () => {
+      if (!isHost) return;
+      socket.emit('update-settings', { syntaxHighlight: toggleSyntaxHighlight.checked });
+      // Remove local toast because the server sends a chat message now, but we can keep local apply
+      isSyntaxHighlightEnabled = toggleSyntaxHighlight.checked;
+      updateEditorDisplay();
+    });
+  }
 
   // Strict Copy Prevention Listener (Exempt Host)
   document.addEventListener('copy', (e) => {
@@ -462,17 +572,19 @@ document.addEventListener('DOMContentLoaded', () => {
     roomCode = codeTextarea.value;
     updateEditorDisplay();
 
-    // Calculate line & character cursor
+    // Calculate line & character cursor & selection
     const cursorPos = codeTextarea.selectionStart;
+    const selEnd = codeTextarea.selectionEnd;
     const textBeforeCursor = roomCode.substring(0, cursorPos);
     const lines = textBeforeCursor.split('\n');
     const line = lines.length;
     const ch = lines[lines.length - 1].length + 1;
+    const selection = (cursorPos !== selEnd) ? { start: cursorPos, end: selEnd } : null;
 
     // Emit live changes to server
     socket.emit('code-change', {
       code: roomCode,
-      cursor: { line, ch }
+      cursor: { line, ch, selection }
     });
   });
 
@@ -488,11 +600,68 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Sync scrolling between textarea and syntax highlight layer / line numbers
+  function emitCursorPosition() {
+    activeRestingCursorUserId = socket.id;
+    const cursorPos = codeTextarea.selectionStart;
+    const selEnd = codeTextarea.selectionEnd;
+    const textBeforeCursor = codeTextarea.value.substring(0, cursorPos);
+    const lines = textBeforeCursor.split('\n');
+    const line = lines.length;
+    const ch = lines[lines.length - 1].length + 1;
+    const selection = (cursorPos !== selEnd) ? { start: cursorPos, end: selEnd } : null;
+
+    if (selection) {
+      activeSelection = null;
+    }
+
+    socket.emit('cursor-change', { line, ch, selection });
+  }
+
+  ['click', 'keyup', 'select'].forEach(evt => {
+    codeTextarea.addEventListener(evt, emitCursorPosition);
+  });
+
+  // Track real-time selection while dragging before mouse release
+  let isMouseDownInTextarea = false;
+  codeTextarea.addEventListener('mousedown', () => {
+    isMouseDownInTextarea = true;
+  });
+  document.addEventListener('mouseup', () => {
+    isMouseDownInTextarea = false;
+  });
+
+  let lastSelectionEmitTime = 0;
+  document.addEventListener('selectionchange', () => {
+    if (document.activeElement === codeTextarea) {
+      const now = Date.now();
+      if (now - lastSelectionEmitTime > 30) {
+        lastSelectionEmitTime = now;
+        emitCursorPosition();
+      }
+    }
+  });
+
+  codeTextarea.addEventListener('mousemove', () => {
+    if (isMouseDownInTextarea) {
+      const now = Date.now();
+      if (now - lastSelectionEmitTime > 30) {
+        lastSelectionEmitTime = now;
+        emitCursorPosition();
+      }
+    }
+  });
+
+  // Sync scrolling between textarea and syntax highlight layer / line numbers / collaborator cursors
+  let isRemoteScroll = false;
   codeTextarea.addEventListener('scroll', () => {
     highlightCode.parentElement.scrollTop = codeTextarea.scrollTop;
     highlightCode.parentElement.scrollLeft = codeTextarea.scrollLeft;
     lineNumbers.scrollTop = codeTextarea.scrollTop;
+    renderCollaboratorCursors();
+    
+    if (!isRemoteScroll) {
+      socket.emit('scroll-sync', { top: codeTextarea.scrollTop, left: codeTextarea.scrollLeft });
+    }
   });
 
   function updateEditorDisplay() {
@@ -505,21 +674,222 @@ document.addEventListener('DOMContentLoaded', () => {
     lineNumbers.textContent = numbersHtml;
 
     // 2. Syntax Highlighting via Prism (Python)
-    highlightCode.className = 'language-python';
     let codeContent = codeTextarea.value;
     if (codeContent.endsWith('\n')) {
       codeContent += ' ';
     }
-    highlightCode.textContent = codeContent;
-    
-    if (window.Prism && Prism.languages.python) {
-      Prism.highlightElement(highlightCode);
+
+    if (isSyntaxHighlightEnabled) {
+      codeTextarea.classList.remove('syntax-disabled');
+      highlightCode.className = 'language-python';
+      highlightCode.textContent = codeContent;
+      if (window.Prism && Prism.languages.python) {
+        Prism.highlightElement(highlightCode);
+      }
+    } else {
+      codeTextarea.classList.add('syntax-disabled');
+      highlightCode.className = 'language-plaintext';
+      highlightCode.textContent = codeContent;
     }
 
     // 3. Keep scroll perfectly aligned
     highlightCode.parentElement.scrollTop = codeTextarea.scrollTop;
     highlightCode.parentElement.scrollLeft = codeTextarea.scrollLeft;
     lineNumbers.scrollTop = codeTextarea.scrollTop;
+
+    renderCollaboratorCursors();
+  }
+
+  function getMonospaceMetrics() {
+    const span = document.createElement('span');
+    span.style.fontFamily = "'Fira Code', 'Consolas', 'Courier New', monospace";
+    span.style.fontSize = '14px';
+    span.style.lineHeight = '1.6';
+    span.style.visibility = 'hidden';
+    span.style.position = 'absolute';
+    span.style.top = '-9999px';
+    span.textContent = 'M'.repeat(100);
+    document.body.appendChild(span);
+    const width = span.getBoundingClientRect().width / 100;
+    document.body.removeChild(span);
+    const charWidth = width || 8.4;
+    const lineHeight = 22.4;
+    return { charWidth, lineHeight };
+  }
+
+  function getSelectionRects(start, end, code) {
+    if (start >= end) return [];
+    const safeEnd = Math.min(end, code.length);
+    const safeStart = Math.min(start, safeEnd);
+
+    const textBeforeStart = code.substring(0, safeStart);
+    const startLines = textBeforeStart.split('\n');
+    const startLine = startLines.length;
+    const startCh = startLines[startLines.length - 1].length + 1;
+
+    const textBeforeEnd = code.substring(0, safeEnd);
+    const endLines = textBeforeEnd.split('\n');
+    const endLine = endLines.length;
+    const endCh = endLines[endLines.length - 1].length + 1;
+
+    const allLines = code.split('\n');
+    const rects = [];
+
+    for (let l = startLine; l <= endLine; l++) {
+      const lineContent = allLines[l - 1] || '';
+      const chStart = (l === startLine) ? startCh : 1;
+      const chEnd = (l === endLine) ? endCh : (lineContent.length + 1);
+      const count = Math.max(1, chEnd - chStart);
+
+      rects.push({
+        line: l,
+        chStart: chStart,
+        count: count
+      });
+    }
+
+    return rects;
+  }
+
+  let activeUserTimeout = null;
+
+  function isPosInsideElement(x, y, elementId) {
+    const el = document.getElementById(elementId);
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }
+
+  function renderCollaboratorCursors() {
+    if (collaboratorCursorsContainer) collaboratorCursorsContainer.innerHTML = '';
+    if (mousePointerContainer) mousePointerContainer.innerHTML = '';
+
+    const { charWidth, lineHeight } = getMonospaceMetrics();
+    const paddingTop = 12;
+    const paddingLeft = 12;
+    const currentCode = codeTextarea.value || '';
+
+    // 1. Render active room text selection highlight if present (releases old selection on new)
+    if (activeSelection && activeSelection.start < activeSelection.end) {
+      const rects = getSelectionRects(activeSelection.start, activeSelection.end, currentCode);
+      rects.forEach(r => {
+        const sTop = (r.line - 1) * lineHeight + paddingTop - codeTextarea.scrollTop;
+        const sLeft = (r.chStart - 1) * charWidth + paddingLeft - codeTextarea.scrollLeft;
+        const sWidth = r.count * charWidth;
+
+        if (sTop >= -25 && sTop <= codeTextarea.clientHeight + 25) {
+          const selEl = document.createElement('div');
+          selEl.className = 'collaborator-selection-box';
+          selEl.style.transform = `translate(${sLeft}px, ${sTop}px)`;
+          selEl.style.width = `${sWidth}px`;
+          selEl.style.height = `${lineHeight}px`;
+          selEl.style.backgroundColor = activeSelection.color;
+          collaboratorCursorsContainer.appendChild(selEl);
+        }
+      });
+    }
+
+    // 2. Render persistent resting cursors and mice (ONLY for the LAST active user)
+    remoteCursors.forEach((data, userId) => {
+      if (userId === socket.id) return;
+      
+      // HIDE ALL inactive users completely. Only the last active typing user is shown.
+      if (userId !== activeRestingCursorUserId) return;
+
+      const userColor = data.color || '#00f0ff';
+      const userName = data.name || 'Collaborator';
+
+      const isActivelyMoving = data.lastMouseMove && (Date.now() - data.lastMouseMove < 1000);
+
+      if (isActivelyMoving && data.mouseX !== undefined && data.mouseY !== undefined) {
+        const el = document.createElement('div');
+        el.className = 'remote-mouse-pointer';
+        el.style.transform = `translate3d(${data.mouseX}px, ${data.mouseY}px, 0)`;
+        
+        if (data.isInsideEditor) {
+          // Inside editor: Text I-beam cursor icon
+          el.innerHTML = `
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="${userColor}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="4" x2="12" y2="20"></line>
+              <line x1="8" y1="4" x2="16" y2="4"></line>
+              <line x1="8" y1="20" x2="16" y2="20"></line>
+            </svg>
+          `;
+        } else {
+          // Outside editor: Standard arrow cursor icon
+          el.innerHTML = `
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="${userColor}" stroke="#ffffff" stroke-width="1.5">
+              <path d="M3 3l7 18 3-7 7-3L3 3z"/>
+            </svg>
+          `;
+        }
+        mousePointerContainer.appendChild(el);
+      }
+      
+      // RESTING CURSOR at specific line/column (ONLY for the LAST active cursor)
+      if (userId === activeRestingCursorUserId && data.cursor && data.cursor.line) {
+        const top = (data.cursor.line - 1) * lineHeight + paddingTop - codeTextarea.scrollTop;
+        const left = (data.cursor.ch - 1) * charWidth + paddingLeft - codeTextarea.scrollLeft;
+
+        if (top >= -25 && top <= codeTextarea.clientHeight + 25) {
+          const cursorEl = document.createElement('div');
+          cursorEl.className = 'collaborator-cursor-item';
+          cursorEl.style.transform = `translate(${left}px, ${top}px)`;
+
+          const caret = document.createElement('div');
+          caret.className = 'collaborator-caret';
+          caret.style.backgroundColor = userColor;
+
+          cursorEl.appendChild(caret);
+          collaboratorCursorsContainer.appendChild(cursorEl);
+        }
+      }
+    });
+  }
+
+
+  // Real-Time Floating Mouse Pointers Tracking
+  let lastMouseMoveTime = 0;
+  window.addEventListener('mousemove', (e) => {
+    if (activeRestingCursorUserId !== socket.id) {
+      activeRestingCursorUserId = socket.id;
+      renderCollaboratorCursors();
+    }
+    
+    const now = Date.now();
+    if (now - lastMouseMoveTime > 30) {
+      lastMouseMoveTime = now;
+      socket.emit('mouse-move', { x: e.clientX, y: e.clientY });
+    }
+  });
+
+  function updateRemoteMousePointer(userId, x, y, name, color) {
+    if (!mousePointerContainer) return;
+
+    let pointerData = remoteMousePointers.get(userId);
+    if (!pointerData) {
+      const el = document.createElement('div');
+      el.className = 'remote-mouse-pointer';
+      el.innerHTML = `
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="${color}" stroke="#ffffff" stroke-width="1.5">
+          <path d="M3 3l7 18 3-7 7-3L3 3z"/>
+        </svg>
+        <div class="mouse-pointer-label" style="background-color: ${color};">${escapeHtml(name)}</div>
+      `;
+      mousePointerContainer.appendChild(el);
+      pointerData = { element: el, timeout: null };
+      remoteMousePointers.set(userId, pointerData);
+    }
+
+    pointerData.element.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+    pointerData.element.style.opacity = '1';
+
+    if (pointerData.timeout) clearTimeout(pointerData.timeout);
+    pointerData.timeout = setTimeout(() => {
+      if (pointerData.element) {
+        pointerData.element.style.opacity = '0';
+      }
+    }, 3000);
   }
 
   // Language Change Listener
@@ -631,11 +1001,13 @@ document.addEventListener('DOMContentLoaded', () => {
     isExecutionRunning = running;
 
     if (running) {
+      runCodeBtn.classList.remove('btn-success');
       runCodeBtn.classList.add('btn-danger', 'is-running');
       runCodeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"></rect></svg>';
       runCodeBtn.title = 'Stop Execution ⏹';
     } else {
       runCodeBtn.classList.remove('btn-danger', 'is-running');
+      runCodeBtn.classList.add('btn-success');
       runCodeBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>';
       runCodeBtn.title = 'Run Code';
     }
@@ -729,6 +1101,15 @@ document.addEventListener('DOMContentLoaded', () => {
     socket.emit('output-sync', { action: 'clear', message: '[Cleared]' });
   });
 
+  let isRemoteOutputScroll = false;
+  if (consoleOutput) {
+    consoleOutput.addEventListener('scroll', () => {
+      if (!isRemoteOutputScroll) {
+        socket.emit('output-scroll-sync', { top: consoleOutput.scrollTop });
+      }
+    });
+  }
+
   // --------------------------------------------------------------------------
   // 6. UI Drawers, Share & Chat Logic
   // --------------------------------------------------------------------------
@@ -751,36 +1132,40 @@ document.addEventListener('DOMContentLoaded', () => {
       document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
       
       tab.classList.add('active');
-      const targetPanel = tab.dataset.tab === 'users' ? 'panelUsers' : 'panelSnapshots';
-      document.getElementById(targetPanel).classList.add('active');
+      const targetPanel = tab.dataset.tab === 'users' ? 'panelUsers' : 'panelUsers';
+      const el = document.getElementById(targetPanel);
+      if (el) el.classList.add('active');
     });
   });
 
-  // In-section Sidebar Toggle Controls
+  // Sidebar Header & Nav Toggle Controls
   const sidebarCollapseBtn = document.getElementById('sidebarCollapseBtn');
-  const sidebarExpandBtn = document.getElementById('sidebarExpandBtn');
 
   if (sidebarCollapseBtn) {
     sidebarCollapseBtn.addEventListener('click', () => {
-      sidebar.classList.add('collapsed');
-      if (sidebarExpandBtn) sidebarExpandBtn.classList.remove('hidden');
+      sidebar.classList.toggle('collapsed');
     });
   }
 
-  if (sidebarExpandBtn) {
-    sidebarExpandBtn.addEventListener('click', () => {
-      sidebar.classList.remove('collapsed');
-      sidebarExpandBtn.classList.add('hidden');
+  if (toggleUsersBtn) {
+    toggleUsersBtn.addEventListener('click', () => {
+      sidebar.classList.toggle('collapsed');
     });
   }
 
-  toggleChatBtn.addEventListener('click', () => {
-    chatDrawer.classList.toggle('collapsed');
-  });
+  // Chat Header & Nav Toggle Controls
+  if (toggleChatBtn) {
+    toggleChatBtn.addEventListener('click', () => {
+      chatDrawer.classList.toggle('collapsed');
+    });
+  }
 
-  document.getElementById('closeChatBtn').addEventListener('click', () => {
-    chatDrawer.classList.add('collapsed');
-  });
+  const closeChatBtn = document.getElementById('closeChatBtn');
+  if (closeChatBtn) {
+    closeChatBtn.addEventListener('click', () => {
+      chatDrawer.classList.toggle('collapsed');
+    });
+  }
 
   // Chat Send
   function sendChatMessage() {
@@ -817,13 +1202,7 @@ document.addEventListener('DOMContentLoaded', () => {
     chatHistory.forEach(msg => appendChatMessage(msg));
   }
 
-  // Snapshots
-  snapshotBtn.addEventListener('click', () => {
-    const label = prompt('Enter a label for this code snapshot:', `Version ${snapshotsList.length + 1}`);
-    if (label !== null) {
-      socket.emit('create-snapshot', { label: label.trim() });
-    }
-  });
+
 
   // Download Code File Handler
   const FILE_EXTENSIONS = {
@@ -872,38 +1251,25 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  function renderSnapshots() {
-    document.getElementById('snapshotTabCount').textContent = snapshotsList.length;
-    if (snapshotsList.length === 0) {
-      snapshotListContainer.innerHTML = '<div class="empty-state">No saved snapshots yet. Click "Snapshot" to freeze current state.</div>';
-      return;
-    }
 
-    snapshotListContainer.innerHTML = '';
-    snapshotsList.forEach(snap => {
-      const card = document.createElement('div');
-      card.className = 'user-card';
-      card.style.flexDirection = 'column';
-      card.style.alignItems = 'flex-start';
-      card.style.gap = '4px';
-      card.innerHTML = `
-        <div style="font-weight: 700; font-size: 0.85rem; color: var(--accent-cyan);">${escapeHtml(snap.label)}</div>
-        <div style="font-size: 0.72rem; color: var(--text-muted);">${snap.timestamp}</div>
-      `;
-      card.style.cursor = 'pointer';
-      card.addEventListener('click', () => {
-        if (confirm(`Restore snapshot "${snap.label}"?`)) {
-          socket.emit('restore-snapshot', { snapshotId: snap.id });
-        }
-      });
-      snapshotListContainer.appendChild(card);
-    });
+
+  function updateRoleBadge() {
+    const userRoleBadge = document.getElementById('userRoleBadge');
+    if (!userRoleBadge) return;
+    if (isHost) {
+      userRoleBadge.className = 'user-role-badge host';
+      userRoleBadge.textContent = '👑 Host';
+    } else {
+      userRoleBadge.className = 'user-role-badge guest';
+      userRoleBadge.textContent = 'Guest';
+    }
   }
 
   // Users List Render
   function renderUsers() {
-    activeUserCount.textContent = usersList.length;
-    document.getElementById('userTabCount').textContent = usersList.length;
+    if (activeUserCount) activeUserCount.textContent = usersList.length;
+    const userTabCount = document.getElementById('userTabCount');
+    if (userTabCount) userTabCount.textContent = usersList.length;
 
     userListContainer.innerHTML = '';
     usersList.forEach(u => {
@@ -916,7 +1282,7 @@ document.addEventListener('DOMContentLoaded', () => {
           </div>
           <div>
             <div class="user-name">${escapeHtml(u.name)} ${u.id === socket.id ? '(You)' : ''}</div>
-            <div style="font-size: 0.7rem; color: var(--text-muted);">Line ${u.cursor ? u.cursor.line : 1}</div>
+            <div style="font-size: 0.7rem; color: var(--text-muted);">Line ${u.cursor ? u.cursor.line : 1}, Col ${u.cursor ? u.cursor.ch : 1}</div>
           </div>
         </div>
         <span class="role-pill ${u.isHost ? 'host' : 'editor'}">${u.isHost ? 'Host' : 'Editor'}</span>

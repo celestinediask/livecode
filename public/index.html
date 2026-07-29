@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CodeSync Live — Real-time Code Sharing with Copy Protection</title>
+  <title>LiveCode — Real-time Code Sharing with Copy Protection</title>
   
   <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -30,8 +30,9 @@
           </svg>
         </div>
         <div class="brand-text">
-          <span class="brand-title">CodeSync<span class="brand-badge">LIVE</span></span>
+          <span class="brand-title">LiveCode</span>
         </div>
+        <span id="userRoleBadge" class="user-role-badge guest">Guest</span>
       </div>
 
       <!-- Room Title & Quick Link -->
@@ -46,11 +47,6 @@
 
       <!-- Protection Control Panel -->
       <div class="protection-panel" id="protectionPanel">
-        <div class="protection-header-label">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-          SECURITY CONTROLS
-        </div>
-
         <div class="protection-toggles">
           <!-- Copy Protection Switch -->
           <label class="toggle-control" id="copyProtectionToggleLabel" title="Prevent copying code to clipboard">
@@ -78,6 +74,15 @@
               <span class="icon">👁️</span> Read Only
             </span>
           </label>
+
+          <!-- Syntax Highlighting Switch -->
+          <label class="toggle-control" title="Toggle syntax highlighting ON/OFF">
+            <input type="checkbox" id="toggleSyntaxHighlight" checked>
+            <span class="toggle-slider"></span>
+            <span class="toggle-text">
+              <span class="icon">🎨</span> Syntax Highlighting
+            </span>
+          </label>
         </div>
       </div>
 
@@ -91,12 +96,8 @@
         </div>
 
         <!-- Action Buttons (Icon-Only) -->
-        <button id="runCodeBtn" class="btn btn-primary btn-icon" title="Run Code">
+        <button id="runCodeBtn" class="btn btn-success btn-icon" title="Run Code">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-        </button>
-
-        <button id="snapshotBtn" class="btn btn-secondary btn-icon" title="Save Code Snapshot">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
         </button>
 
         <button id="downloadCodeBtn" class="btn btn-secondary btn-icon" title="Download Code File">
@@ -106,24 +107,16 @@
         <button id="copyCodeBtn" class="btn btn-secondary btn-icon" title="Copy Code to Clipboard">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         </button>
-
-        <button id="toggleChatBtn" class="btn btn-icon" title="Open Chat">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
-        </button>
       </div>
     </header>
 
     <!-- Main Workspace Section -->
     <main class="workspace">
 
-      <!-- Left Sidebar Drawer: Collaborators & Snapshots -->
+      <!-- Left Sidebar Drawer: Collaborators -->
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
-          <div class="sidebar-tabs">
-            <button class="sidebar-tab active" data-tab="users">Collaborators (<span id="userTabCount">1</span>)</button>
-            <button class="sidebar-tab" data-tab="snapshots">Snapshots (<span id="snapshotTabCount">0</span>)</button>
-          </div>
-          <button id="sidebarCollapseBtn" class="sidebar-toggle-btn" title="Collapse Section">✕</button>
+          <div class="sidebar-title" style="font-weight: 600; font-size: 0.9rem; color: var(--text-primary);">Collaborators (<span id="userTabCount">1</span>)</div>
         </div>
 
         <div class="sidebar-content">
@@ -132,26 +125,9 @@
             <div class="user-list" id="userListContainer">
               <!-- Dynamically populated -->
             </div>
-            <div class="role-legend">
-              <div class="legend-item"><span class="role-pill host">Host</span> Full Protection Controls</div>
-              <div class="legend-item"><span class="role-pill editor">Editor</span> Real-time Typing</div>
-            </div>
-          </div>
-
-          <!-- Snapshots Panel -->
-          <div class="tab-panel" id="panelSnapshots">
-            <div class="snapshot-list" id="snapshotListContainer">
-              <div class="empty-state">No saved snapshots yet. Click 'Snapshot' to freeze current state.</div>
-            </div>
           </div>
         </div>
       </aside>
-
-      <!-- In-section Floating Handle to Expand Users Panel when collapsed -->
-      <button id="sidebarExpandBtn" class="sidebar-expand-btn hidden" title="View Users / Collaborators Section">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><polyline points="9 18 15 12 9 6"></polyline></svg>
-        <span class="user-badge-count" id="activeUserCount">1</span>
-      </button>
 
       <!-- Center Code Editor Container -->
       <section class="editor-section">
@@ -160,19 +136,18 @@
         <div class="protection-banner" id="protectionBanner">
           <div class="banner-content">
             <span class="shield-badge">🔒 COPYING DISABLED</span>
-            <span class="banner-desc">The host has enforced copy protection. Selecting and copying code is restricted.</span>
           </div>
           <div class="protection-indicator-pill">PROTECTED SESSION</div>
         </div>
 
         <!-- Code Editor Area -->
         <div class="editor-wrapper" id="editorWrapper">
-          <!-- Line Numbers -->
-          <div class="line-numbers" id="lineNumbers">1</div>
+          <!-- Line Numbers Gutter -->
+          <div class="editor-line-numbers" id="lineNumbers">1</div>
 
           <!-- Code Text Area / Highlighting Layer -->
           <div class="code-editor-area" id="codeEditorArea">
-            <textarea id="codeTextarea" spellcheck="false" autocomplete="off" capitalize="off" placeholder="# Type or paste Python code here..."># CodeSync Live — Python Workspace
+            <textarea id="codeTextarea" spellcheck="false" autocomplete="off" capitalize="off" placeholder="# Type or paste Python code here..."># LiveCode — Python Workspace
 # Type Python code here to collaborate live across all clients.
 
 def is_prime(n):
@@ -195,9 +170,9 @@ print("🚀 Live Python Workspace synchronized!")</textarea>
 
             <!-- Dynamic Watermark Layer when Copying Disabled -->
             <div class="watermark-overlay" id="watermarkOverlay">
-              <div class="watermark-text">CODESYNC PROTECTED • COPY DISABLED</div>
-              <div class="watermark-text">CODESYNC PROTECTED • COPY DISABLED</div>
-              <div class="watermark-text">CODESYNC PROTECTED • COPY DISABLED</div>
+              <div class="watermark-text">LIVECODE PROTECTED • COPY DISABLED</div>
+              <div class="watermark-text">LIVECODE PROTECTED • COPY DISABLED</div>
+              <div class="watermark-text">LIVECODE PROTECTED • COPY DISABLED</div>
             </div>
           </div>
         </div>
@@ -233,11 +208,10 @@ print("🚀 Live Python Workspace synchronized!")</textarea>
       <aside class="chat-drawer" id="chatDrawer">
         <div class="chat-header">
           <span>💬 Live Session Chat</span>
-          <button id="closeChatBtn" class="btn-text">✕</button>
         </div>
         <div class="chat-messages" id="chatMessages">
           <div class="chat-bubble system">
-            <span>Welcome to CodeSync Live! Messages and security notifications appear here.</span>
+            <span>Welcome to LiveCode! Messages and security notifications appear here.</span>
           </div>
         </div>
         <div class="chat-input-area">
@@ -250,6 +224,9 @@ print("🚀 Live Python Workspace synchronized!")</textarea>
 
     <!-- Toast Notification Container -->
     <div id="toastContainer" class="toast-container"></div>
+
+    <!-- Real-time Collaborator Mouse Pointers Container -->
+    <div id="mousePointerContainer" class="mouse-pointer-container"></div>
 
   </div>
 

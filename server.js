@@ -42,7 +42,7 @@ function getRandomColor() {
 
 // Starter code sample for Python
 const DEFAULT_CODE = {
-  python: `# CodeSync Live - Python Workspace
+  python: `# LiveCode — Python Workspace
 def is_prime(n):
     if n <= 1:
         return False
@@ -64,6 +64,8 @@ function getOrCreateRoom(roomId) {
       code: DEFAULT_CODE.python,
       language: 'python',
       hostSocketId: null,
+      hostToken: null,
+      hostReconnectTimer: null,
       created: Date.now(),
       settings: {
         copyDisabled: true, // Default enabled protection
@@ -72,8 +74,7 @@ function getOrCreateRoom(roomId) {
         locked: false
       },
       users: new Map(), // socketId -> User info
-      chat: [],
-      snapshots: []
+      chat: []
     });
   }
   return rooms.get(roomId);
@@ -124,11 +125,11 @@ io.on('connection', (socket) => {
   let currentUser = null;
 
   // Join Room
-  socket.on('join-room', ({ roomId, username }) => {
+  socket.on('join-room', ({ roomId, username, userToken }) => {
     const cleanRoomId = (roomId || 'default').toLowerCase();
     const room = getOrCreateRoom(cleanRoomId);
 
-    if (room.settings.locked && room.users.size > 0) {
+    if (room.settings.locked && room.users.size > 0 && room.hostToken !== userToken) {
       socket.emit('room-error', { message: 'This room is currently locked by the host.' });
       return;
     }
@@ -136,17 +137,27 @@ io.on('connection', (socket) => {
     currentRoomId = cleanRoomId;
     socket.join(cleanRoomId);
 
-    // Assign host if first user
-    const isHost = room.users.size === 0 || room.hostSocketId === null || room.hostSocketId === socket.id;
-    if (isHost) {
+    // Check if reconnecting user is the original Host
+    if (room.hostToken && room.hostToken === userToken) {
+      if (room.hostReconnectTimer) {
+        clearTimeout(room.hostReconnectTimer);
+        room.hostReconnectTimer = null;
+      }
       room.hostSocketId = socket.id;
+    } else if (room.users.size === 0 || room.hostSocketId === null || !room.hostToken) {
+      // First user or unclaimed room becomes Host
+      room.hostSocketId = socket.id;
+      room.hostToken = userToken;
     }
+
+    const isHost = room.hostSocketId === socket.id;
 
     currentUser = {
       id: socket.id,
+      token: userToken,
       name: username || `User-${socket.id.substring(0, 4)}`,
       color: getRandomColor(),
-      isHost: room.hostSocketId === socket.id,
+      isHost: isHost,
       cursor: { line: 1, ch: 1 },
       joinedAt: Date.now()
     };
@@ -162,8 +173,7 @@ io.on('connection', (socket) => {
       currentUser: currentUser,
       isHost: currentUser.isHost,
       users: Array.from(room.users.values()),
-      chat: room.chat,
-      snapshots: room.snapshots.map(s => ({ id: s.id, timestamp: s.timestamp, label: s.label }))
+      chat: room.chat
     });
 
     // Notify room of new user
@@ -214,6 +224,35 @@ io.on('connection', (socket) => {
     socket.to(currentRoomId).emit('cursor-update', {
       userId: socket.id,
       cursor: cursor
+    });
+  });
+
+  // Real-time mouse movement tracking
+  socket.on('mouse-move', ({ x, y }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    socket.to(currentRoomId).emit('mouse-update', {
+      userId: socket.id,
+      x: x,
+      y: y
+    });
+  });
+
+  // Real-time scrolling sync
+  socket.on('scroll-sync', ({ top, left }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    socket.to(currentRoomId).emit('scroll-update', {
+      userId: socket.id,
+      top: top,
+      left: left
+    });
+  });
+
+  // Real-time output scrolling sync
+  socket.on('output-scroll-sync', ({ top }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    socket.to(currentRoomId).emit('output-scroll-update', {
+      userId: socket.id,
+      top: top
     });
   });
 
@@ -296,6 +335,9 @@ io.on('connection', (socket) => {
     if (newSettings.readOnly !== undefined) {
       changeDesc.push(`Read-only mode ${newSettings.readOnly ? 'ENABLED 👁️' : 'DISABLED ✏️'}`);
     }
+    if (newSettings.syntaxHighlight !== undefined) {
+      changeDesc.push(`Syntax highlighting ${newSettings.syntaxHighlight ? 'ENABLED 🎨' : 'DISABLED ⚪'}`);
+    }
 
     if (changeDesc.length > 0) {
       const sysMsg = {
@@ -345,34 +387,7 @@ io.on('connection', (socket) => {
     io.to(currentRoomId).emit('chat-message', msg);
   });
 
-  // Create Snapshot
-  socket.on('create-snapshot', ({ label }) => {
-    if (!currentRoomId || !rooms.has(currentRoomId)) return;
-    const room = rooms.get(currentRoomId);
-    const snapshot = {
-      id: Date.now().toString(),
-      timestamp: new Date().toLocaleTimeString(),
-      label: label || `Snapshot ${room.snapshots.length + 1}`,
-      code: room.code,
-      language: room.language,
-      author: currentUser ? currentUser.name : 'Anonymous'
-    };
-    room.snapshots.push(snapshot);
-    io.to(currentRoomId).emit('snapshot-created', snapshot);
-  });
 
-  // Restore Snapshot
-  socket.on('restore-snapshot', ({ snapshotId }) => {
-    if (!currentRoomId || !rooms.has(currentRoomId)) return;
-    const room = rooms.get(currentRoomId);
-    const snap = room.snapshots.find(s => s.id === snapshotId);
-    if (snap) {
-      room.code = snap.code;
-      room.language = snap.language;
-      io.to(currentRoomId).emit('code-update', { code: room.code, senderId: null });
-      io.to(currentRoomId).emit('language-update', { language: room.language });
-    }
-  });
 
   // Disconnect
   socket.on('disconnect', () => {
@@ -380,16 +395,30 @@ io.on('connection', (socket) => {
       const room = rooms.get(currentRoomId);
       room.users.delete(socket.id);
 
-      // Reassign host if host left
+      // Handle Host disconnect with 15-second grace period for page refresh
       if (room.hostSocketId === socket.id) {
-        const remainingUsers = Array.from(room.users.values());
-        if (remainingUsers.length > 0) {
-          room.hostSocketId = remainingUsers[0].id;
-          remainingUsers[0].isHost = true;
-          io.to(remainingUsers[0].id).emit('host-assigned', { isHost: true });
-        } else {
-          room.hostSocketId = null;
+        room.hostSocketId = null;
+        if (room.hostReconnectTimer) {
+          clearTimeout(room.hostReconnectTimer);
         }
+
+        room.hostReconnectTimer = setTimeout(() => {
+          if (rooms.has(currentRoomId)) {
+            const currentRoom = rooms.get(currentRoomId);
+            if (currentRoom.hostSocketId === null && currentRoom.users.size > 0) {
+              const remainingUsers = Array.from(currentRoom.users.values());
+              const newHost = remainingUsers[0];
+              currentRoom.hostSocketId = newHost.id;
+              currentRoom.hostToken = newHost.token;
+              newHost.isHost = true;
+
+              io.to(newHost.id).emit('host-assigned', { isHost: true });
+              io.to(currentRoomId).emit('users-update', {
+                users: Array.from(currentRoom.users.values())
+              });
+            }
+          }
+        }, 15000);
       }
 
       // If room is empty, set cleanup timer (1 hour)
@@ -423,7 +452,7 @@ const PORT = process.env.PORT || 3000;
 
 if (require.main === module) {
   server.listen(PORT, () => {
-    console.log(`⚡ CodeSync Live Service running on http://localhost:${PORT}`);
+    console.log(`⚡ LiveCode Service running on http://localhost:${PORT}`);
   });
 }
 
