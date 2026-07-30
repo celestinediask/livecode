@@ -66,6 +66,19 @@ document.addEventListener('DOMContentLoaded', () => {
   // Lists & Containers
   const userListContainer = document.getElementById('userListContainer');
   const collaboratorCursorsContainer = document.getElementById('collaboratorCursors');
+  
+  const persistentCursorEl = document.createElement('div');
+  persistentCursorEl.className = 'collaborator-cursor-item';
+  persistentCursorEl.style.display = 'none';
+  const persistentCaret = document.createElement('div');
+  persistentCaret.className = 'collaborator-caret';
+  persistentCursorEl.appendChild(persistentCaret);
+  
+  // Wait to append until we're sure the container is ready
+  setTimeout(() => {
+    document.getElementById('collaboratorCursors').appendChild(persistentCursorEl);
+  }, 100);
+
   const mousePointerContainer = document.getElementById('mousePointerContainer');
   const chatMessages = document.getElementById('chatMessages');
   const chatInput = document.getElementById('chatInput');
@@ -163,17 +176,18 @@ document.addEventListener('DOMContentLoaded', () => {
       codeTextarea.value = code;
       roomCode = code;
       codeTextarea.setSelectionRange(cursorPos, cursorPos);
-      updateEditorDisplay();
+      
       if (senderId && cursor) {
         const user = usersList.find(u => u.id === senderId);
         if (user) {
           activeRestingCursorUserId = senderId;
           user.cursor = cursor;
           remoteCursors.set(senderId, { cursor: cursor, name: user.name, color: user.color, isInsideEditor: true });
-          renderUsers();
-          renderCollaboratorCursors();
         }
       }
+      
+      updateEditorDisplay();
+      renderUsers();
     }
   });
 
@@ -204,21 +218,25 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   socket.on('cursor-update', ({ userId, cursor }) => {
+    if (userId === socket.id) return;
     const user = usersList.find(u => u.id === userId);
     if (user) {
       activeRestingCursorUserId = userId;
       user.cursor = cursor;
       remoteCursors.set(userId, { cursor: cursor, name: user.name, color: user.color, isInsideEditor: true });
 
-      if (cursor.selection && cursor.selection.start < cursor.selection.end) {
+      if (cursor.selection && cursor.selection.start !== cursor.selection.end) {
         activeSelection = {
           userId: userId,
           start: cursor.selection.start,
           end: cursor.selection.end,
           color: user.color
         };
+        // Clear local browser selection so only one selection exists globally
+        window.getSelection().removeAllRanges();
+        codeTextarea.setSelectionRange(codeTextarea.selectionStart, codeTextarea.selectionStart);
       } else if (!cursor.selection || cursor.selection.start === cursor.selection.end) {
-        if (activeSelection && activeSelection.userId === userId) {
+        if (activeSelection) {
           activeSelection = null;
         }
       }
@@ -227,11 +245,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  socket.on('clear-selections', () => {
+    window.getSelection().removeAllRanges();
+    codeTextarea.setSelectionRange(codeTextarea.selectionStart, codeTextarea.selectionStart);
+    if (activeSelection !== null) {
+      activeSelection = null;
+      renderCollaboratorCursors();
+    }
+  });
+
   socket.on('mouse-update', ({ userId, x, y }) => {
     if (userId === socket.id) return;
     const user = usersList.find(u => u.id === userId);
     if (user) {
-      activeRestingCursorUserId = userId;
       const inside = isPosInsideElement(x, y, 'codeEditorArea');
       const existing = remoteCursors.get(userId) || { cursor: user.cursor, name: user.name, color: user.color };
       existing.mouseX = x;
@@ -513,6 +539,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const isCmdOrCtrl = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
 
+    // Reset resting cursor to local user on any keypress
+    if (activeRestingCursorUserId !== socket.id) {
+      activeRestingCursorUserId = socket.id;
+      renderCollaboratorCursors();
+    }
+
+    // Prevent Save (Ctrl+S / Cmd+S for all)
+    if (isCmdOrCtrl && key === 's') {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
     // Prevent Copy
     if (isCmdOrCtrl && (key === 'c' || key === 'insert') && isCopyDisabled && !isHost) {
       e.preventDefault();
@@ -569,6 +608,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // --------------------------------------------------------------------------
 
   codeTextarea.addEventListener('input', () => {
+    activeRestingCursorUserId = socket.id;
     roomCode = codeTextarea.value;
     updateEditorDisplay();
 
@@ -610,14 +650,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const ch = lines[lines.length - 1].length + 1;
     const selection = (cursorPos !== selEnd) ? { start: cursorPos, end: selEnd } : null;
 
-    if (selection) {
+    if (activeSelection !== null) {
       activeSelection = null;
     }
-
+    
+    renderCollaboratorCursors();
     socket.emit('cursor-change', { line, ch, selection });
   }
 
-  ['click', 'keyup', 'select'].forEach(evt => {
+  ['click', 'keyup'].forEach(evt => {
     codeTextarea.addEventListener(evt, emitCursorPosition);
   });
 
@@ -625,22 +666,13 @@ document.addEventListener('DOMContentLoaded', () => {
   let isMouseDownInTextarea = false;
   codeTextarea.addEventListener('mousedown', () => {
     isMouseDownInTextarea = true;
+    socket.emit('clear-selections');
   });
   document.addEventListener('mouseup', () => {
     isMouseDownInTextarea = false;
   });
 
   let lastSelectionEmitTime = 0;
-  document.addEventListener('selectionchange', () => {
-    if (document.activeElement === codeTextarea) {
-      const now = Date.now();
-      if (now - lastSelectionEmitTime > 30) {
-        lastSelectionEmitTime = now;
-        emitCursorPosition();
-      }
-    }
-  });
-
   codeTextarea.addEventListener('mousemove', () => {
     if (isMouseDownInTextarea) {
       const now = Date.now();
@@ -761,13 +793,27 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderCollaboratorCursors() {
-    if (collaboratorCursorsContainer) collaboratorCursorsContainer.innerHTML = '';
+    if (collaboratorCursorsContainer) {
+      // Clear ONLY the selection boxes, keep the persistent cursor
+      Array.from(collaboratorCursorsContainer.children).forEach(child => {
+        if (child !== persistentCursorEl) {
+          child.remove();
+        }
+      });
+    }
     if (mousePointerContainer) mousePointerContainer.innerHTML = '';
 
     const { charWidth, lineHeight } = getMonospaceMetrics();
     const paddingTop = 12;
     const paddingLeft = 12;
     const currentCode = codeTextarea.value || '';
+
+    // If the active user is remote, hide the local native blinking cursor so there's only one.
+    if (activeRestingCursorUserId !== socket.id && activeRestingCursorUserId !== null) {
+      codeTextarea.classList.add('hide-caret');
+    } else {
+      codeTextarea.classList.remove('hide-caret');
+    }
 
     // 1. Render active room text selection highlight if present (releases old selection on new)
     if (activeSelection && activeSelection.start < activeSelection.end) {
@@ -792,9 +838,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // 2. Render persistent resting cursors and mice (ONLY for the LAST active user)
     remoteCursors.forEach((data, userId) => {
       if (userId === socket.id) return;
-      
-      // HIDE ALL inactive users completely. Only the last active typing user is shown.
-      if (userId !== activeRestingCursorUserId) return;
 
       const userColor = data.color || '#00f0ff';
       const userName = data.name || 'Collaborator';
@@ -832,30 +875,25 @@ document.addEventListener('DOMContentLoaded', () => {
         const left = (data.cursor.ch - 1) * charWidth + paddingLeft - codeTextarea.scrollLeft;
 
         if (top >= -25 && top <= codeTextarea.clientHeight + 25) {
-          const cursorEl = document.createElement('div');
-          cursorEl.className = 'collaborator-cursor-item';
-          cursorEl.style.transform = `translate(${left}px, ${top}px)`;
-
-          const caret = document.createElement('div');
-          caret.className = 'collaborator-caret';
-          caret.style.backgroundColor = userColor;
-
-          cursorEl.appendChild(caret);
-          collaboratorCursorsContainer.appendChild(cursorEl);
+          persistentCursorEl.style.display = 'flex';
+          persistentCursorEl.style.transform = `translate(${left}px, ${top}px)`;
+          persistentCaret.style.backgroundColor = userColor;
+        } else {
+          persistentCursorEl.style.display = 'none';
         }
       }
     });
+    
+    // If active user disconnected, no active user, or active user is local
+    if (!activeRestingCursorUserId || activeRestingCursorUserId === socket.id || !remoteCursors.has(activeRestingCursorUserId)) {
+      persistentCursorEl.style.display = 'none';
+    }
   }
 
 
   // Real-Time Floating Mouse Pointers Tracking
   let lastMouseMoveTime = 0;
   window.addEventListener('mousemove', (e) => {
-    if (activeRestingCursorUserId !== socket.id) {
-      activeRestingCursorUserId = socket.id;
-      renderCollaboratorCursors();
-    }
-    
     const now = Date.now();
     if (now - lastMouseMoveTime > 30) {
       lastMouseMoveTime = now;
@@ -1166,6 +1204,29 @@ document.addEventListener('DOMContentLoaded', () => {
       chatDrawer.classList.toggle('collapsed');
     });
   }
+  // Settings Dropdown Toggle
+  const settingsBtn = document.getElementById('settingsBtn');
+  const protectionPanel = document.getElementById('protectionPanel');
+  if (settingsBtn) {
+    settingsBtn.addEventListener('click', () => {
+      alert("not implemented yet");
+    });
+  }
+
+  // Automatically hide sidebars on small screens
+  const mql = window.matchMedia('(max-width: 1250px)');
+  function handleScreenChange(e) {
+    if (e.matches) {
+      if (sidebar) sidebar.classList.add('collapsed');
+      if (chatDrawer) chatDrawer.classList.add('collapsed');
+    } else {
+      if (sidebar) sidebar.classList.remove('collapsed');
+      if (chatDrawer) chatDrawer.classList.remove('collapsed');
+      if (protectionPanel) protectionPanel.classList.remove('show');
+    }
+  }
+  mql.addEventListener('change', handleScreenChange);
+  handleScreenChange(mql);
 
   // Chat Send
   function sendChatMessage() {
@@ -1258,7 +1319,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!userRoleBadge) return;
     if (isHost) {
       userRoleBadge.className = 'user-role-badge host';
-      userRoleBadge.textContent = '👑 Host';
+      userRoleBadge.textContent = 'Host';
     } else {
       userRoleBadge.className = 'user-role-badge guest';
       userRoleBadge.textContent = 'Guest';

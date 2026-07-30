@@ -227,6 +227,11 @@ io.on('connection', (socket) => {
     });
   });
 
+  socket.on('clear-selections', () => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    socket.to(currentRoomId).emit('clear-selections');
+  });
+
   // Real-time mouse movement tracking
   socket.on('mouse-move', ({ x, y }) => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;

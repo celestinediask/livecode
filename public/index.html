@@ -39,8 +39,10 @@
       <div class="room-identity">
         <div class="room-id-chip" id="roomShareBtn" title="Click to copy shareable link">
           <span class="pulse-dot"></span>
-          <span class="room-label">ROOM:</span>
-          <span class="room-id" id="displayRoomId">------</span>
+          <span class="room-text-wrapper">
+            <span class="room-label">ROOM:</span>
+            <span class="room-id" id="displayRoomId">------</span>
+          </span>
           <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
         </div>
       </div>
@@ -49,39 +51,27 @@
       <div class="protection-panel" id="protectionPanel">
         <div class="protection-toggles">
           <!-- Copy Protection Switch -->
-          <label class="toggle-control" id="copyProtectionToggleLabel" title="Prevent copying code to clipboard">
-            <input type="checkbox" id="toggleCopyProtection" checked>
-            <span class="toggle-slider"></span>
-            <span class="toggle-text">
-              <span class="icon">🔒</span> Disable Copy
-            </span>
+          <label class="icon-toggle" title="Prevent guests from copying code" id="copyProtectionToggleLabel">
+            <input type="checkbox" id="toggleCopyProtection">
+            <span class="icon">🔒</span>
           </label>
 
           <!-- Paste Protection Switch -->
-          <label class="toggle-control" title="Prevent pasting external code into editor">
+          <label class="icon-toggle" title="Prevent pasting external code into editor">
             <input type="checkbox" id="togglePasteProtection">
-            <span class="toggle-slider"></span>
-            <span class="toggle-text">
-              <span class="icon">🚫</span> Disable Paste
-            </span>
+            <span class="icon">🚫</span>
           </label>
 
           <!-- Read-Only Mode Switch -->
-          <label class="toggle-control" title="Make room read-only for participants">
+          <label class="icon-toggle" title="Make room read-only for participants">
             <input type="checkbox" id="toggleReadOnly">
-            <span class="toggle-slider"></span>
-            <span class="toggle-text">
-              <span class="icon">👁️</span> Read Only
-            </span>
+            <span class="icon">👁️</span>
           </label>
 
           <!-- Syntax Highlighting Switch -->
-          <label class="toggle-control" title="Toggle syntax highlighting ON/OFF">
+          <label class="icon-toggle" title="Toggle syntax highlighting ON/OFF">
             <input type="checkbox" id="toggleSyntaxHighlight" checked>
-            <span class="toggle-slider"></span>
-            <span class="toggle-text">
-              <span class="icon">🎨</span> Syntax Highlighting
-            </span>
+            <span class="icon">🎨</span>
           </label>
         </div>
       </div>
@@ -95,7 +85,13 @@
           </select>
         </div>
 
-        <!-- Action Buttons (Icon-Only) -->
+        <button id="toggleUsersBtn" class="btn btn-secondary btn-icon" title="Toggle Collaborators">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+        </button>
+        <button id="toggleChatBtn" class="btn btn-secondary btn-icon" title="Toggle Chat">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+        </button>
+
         <button id="runCodeBtn" class="btn btn-success btn-icon" title="Run Code">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
         </button>
@@ -106,6 +102,10 @@
 
         <button id="copyCodeBtn" class="btn btn-secondary btn-icon" title="Copy Code to Clipboard">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        </button>
+
+        <button id="settingsBtn" class="btn btn-secondary btn-icon" title="Settings">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
         </button>
       </div>
     </header>

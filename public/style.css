@@ -103,7 +103,7 @@ body {
 }
 
 .user-role-badge.host {
-  color: var(--text-primary);
+  color: var(--text-secondary);
 }
 
 .user-role-badge.guest {
@@ -186,71 +186,54 @@ body {
   gap: 1.5rem;
 }
 
-/* Custom Toggle Switch */
-.toggle-control {
-  display: flex;
+/* Icon Toggle Button */
+.icon-toggle {
+  display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-  cursor: pointer;
-  user-select: none;
-  font-size: 0.78rem;
-  font-weight: 500;
-  color: var(--text-secondary);
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
   background: rgba(31, 41, 61, 0.6);
   border: 1px solid var(--border-color);
-  padding: 0.35rem 0.75rem;
-  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all 0.2s ease;
 }
 
-.toggle-control input {
+.icon-toggle input {
   display: none;
 }
 
-.toggle-control:has(input:disabled) {
+.icon-toggle:has(input:checked) {
+  background: rgba(0, 240, 255, 0.15);
+  border-color: var(--accent-cyan);
+  color: #fff;
+  box-shadow: 0 0 8px rgba(0, 240, 255, 0.3);
+}
+
+.icon-toggle:has(input:disabled) {
   opacity: 0.4;
   cursor: not-allowed;
   filter: grayscale(100%);
 }
 
-.toggle-slider {
-  width: 30px;
-  height: 16px;
-  background-color: #374151;
-  border-radius: 20px;
-  position: relative;
-  transition: background-color 0.25s ease;
+.icon-toggle:has(#toggleCopyProtection:checked) {
+  background: rgba(244, 63, 94, 0.15);
+  border-color: var(--accent-rose);
+  box-shadow: 0 0 8px rgba(244, 63, 94, 0.3);
 }
 
-.toggle-slider::after {
-  content: '';
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 12px;
-  height: 12px;
-  background-color: #fff;
-  border-radius: 50%;
-  transition: transform 0.25s ease;
+.icon-toggle:has(#togglePasteProtection:checked) {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: var(--accent-amber);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.3);
 }
 
-.toggle-control input:checked + .toggle-slider {
-  background-color: var(--accent-rose);
-}
-
-#togglePasteProtection:checked + .toggle-slider {
-  background-color: var(--accent-amber);
-}
-
-#toggleReadOnly:checked + .toggle-slider {
-  background-color: var(--accent-purple);
-}
-
-.toggle-control input:checked + .toggle-slider::after {
-  transform: translateX(14px);
-}
-
-.toggle-control:hover .toggle-text {
-  color: var(--text-primary);
+.icon-toggle:has(#toggleReadOnly:checked) {
+  background: rgba(168, 85, 247, 0.15);
+  border-color: var(--accent-purple);
+  box-shadow: 0 0 8px rgba(168, 85, 247, 0.3);
 }
 
 /* Header Actions */
@@ -299,14 +282,12 @@ body {
 }
 
 .btn-success {
-  background: linear-gradient(135deg, var(--accent-emerald), #059669) !important;
-  color: #fff !important;
-  border: 1px solid rgba(16, 185, 129, 0.4) !important;
+  background: var(--bg-card) !important;
+  color: var(--accent-emerald) !important;
+  border: 1px solid var(--border-color) !important;
 }
 .btn-success:hover {
-  background: linear-gradient(135deg, #34d399, #059669) !important;
-  filter: brightness(1.15);
-  box-shadow: 0 0 14px rgba(16, 185, 129, 0.5) !important;
+  background: var(--border-color) !important;
 }
 
 .btn-secondary {
@@ -675,8 +656,12 @@ code .line-numbers-rows {
   overflow: auto;
 }
 
+#codeTextarea.hide-caret {
+  caret-color: transparent !important;
+}
+
 #codeTextarea.syntax-disabled {
-  color: #f8fafc !important;
+  color: #94a3b8 !important; /* Dimmed from #f8fafc */
 }
 
 #codeTextarea::placeholder {
@@ -1172,4 +1157,55 @@ body.read-only-mode #codeTextarea {
   font-size: 0.8rem;
   color: var(--text-secondary);
   cursor: pointer;
+}
+
+.mobile-only {
+  display: none;
+}
+
+/* ==========================================================================
+   Responsive & Mobile Layout
+   ========================================================================== */
+@media (max-width: 1250px) {
+  .app-header {
+    gap: 0.5rem;
+    padding: 0 0.5rem;
+  }
+  
+  .header-actions {
+    justify-content: flex-end;
+  }
+  
+
+
+  .workspace {
+    flex-direction: column;
+  }
+  
+  .sidebar, .chat-drawer {
+    position: absolute;
+    height: 100%;
+    width: 100%;
+    max-width: 320px;
+    z-index: 100;
+    box-shadow: 0 0 20px rgba(0,0,0,0.5);
+  }
+
+  .sidebar.collapsed {
+    transform: translateX(-100%);
+    margin-left: 0;
+  }
+
+  .chat-drawer {
+    right: 0;
+  }
+  
+  .chat-drawer.collapsed {
+    transform: translateX(100%);
+    margin-right: 0;
+  }
+  
+  .room-text-wrapper {
+    display: none;
+  }
 }
