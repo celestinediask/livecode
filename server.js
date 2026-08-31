@@ -20,6 +20,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 // In-memory Room Storage
 const rooms = new Map();
 
+// Map to hold pending synchronous XHR requests for user input
+const pendingInputs = new Map();
+
 // Helper to generate clean short IDs
 function generateRoomId() {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -36,24 +39,24 @@ const USER_COLORS = [
   '#ef476f', '#118ab2', '#ffd166', '#a06cd5', '#e76f51'
 ];
 
+function getColorForToken(token) {
+  if (!token) return USER_COLORS[0];
+  let hash = 0;
+  for (let i = 0; i < token.length; i++) {
+    hash = (hash << 5) - hash + token.charCodeAt(i);
+    hash |= 0;
+  }
+  const index = Math.abs(hash) % USER_COLORS.length;
+  return USER_COLORS[index];
+}
+
 function getRandomColor() {
   return USER_COLORS[Math.floor(Math.random() * USER_COLORS.length)];
 }
 
 // Starter code sample for Python
 const DEFAULT_CODE = {
-  python: `# LiveCode — Python Workspace
-def is_prime(n):
-    if n <= 1:
-        return False
-    for i in range(2, int(n**0.5) + 1):
-        if n % i == 0:
-            return False
-    return True
-
-primes = [x for x in range(1, 50) if is_prime(x)]
-print("Primes up to 50:", primes)
-print("🚀 Live Python Workspace synchronized!")`
+  python: ``
 };
 
 function getOrCreateRoom(roomId) {
@@ -62,7 +65,10 @@ function getOrCreateRoom(roomId) {
       id: roomId,
       title: `Session ${roomId.toUpperCase()}`,
       code: DEFAULT_CODE.python,
+      activeFile: 'Untitled',
       language: 'python',
+      files: [],
+      cwd: '/home/pyodide',
       hostSocketId: null,
       hostToken: null,
       hostReconnectTimer: null,
@@ -71,13 +77,21 @@ function getOrCreateRoom(roomId) {
         copyDisabled: true, // Default enabled protection
         pasteDisabled: false,
         readOnly: false,
+        liveSharingEnabled: false,
         locked: false
       },
       users: new Map(), // socketId -> User info
+      joinedTokens: new Set(),
+      leaveTimers: new Map(), // userToken -> timerId
       chat: []
     });
   }
   return rooms.get(roomId);
+}
+
+function getActiveRoomUsers(room) {
+  if (!room || !room.users) return [];
+  return Array.from(room.users.values()).filter(u => u.isHost || u.hasCustomName);
 }
 
 // REST Endpoints
@@ -114,6 +128,26 @@ app.get('/api/rooms/:roomId', (req, res) => {
   });
 });
 
+// Synchronous Web Worker Input Endpoint
+app.post('/api/sync-input', (req, res) => {
+  const { roomId, promptText } = req.body;
+  if (!roomId) {
+    return res.status(400).send('');
+  }
+  
+  // Forward the prompt text to all clients in the room to trigger input UI
+  io.to(roomId).emit('output-update', { action: 'input_request', text: promptText || '' });
+
+  const timeoutId = setTimeout(() => {
+    if (pendingInputs.has(roomId) && pendingInputs.get(roomId).res === res) {
+      pendingInputs.delete(roomId);
+      res.send('');
+    }
+  }, 5 * 60 * 1000); // 5 minute timeout
+  
+  pendingInputs.set(roomId, { res, timeoutId });
+});
+
 // Serve frontend for /room/:id routes
 app.get('/room/:roomId', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -137,6 +171,12 @@ io.on('connection', (socket) => {
     currentRoomId = cleanRoomId;
     socket.join(cleanRoomId);
 
+    // Cancel any pending leave timer if user is reconnecting
+    if (userToken && room.leaveTimers && room.leaveTimers.has(userToken)) {
+      clearTimeout(room.leaveTimers.get(userToken));
+      room.leaveTimers.delete(userToken);
+    }
+
     // Check if reconnecting user is the original Host
     if (room.hostToken && room.hostToken === userToken) {
       if (room.hostReconnectTimer) {
@@ -152,11 +192,18 @@ io.on('connection', (socket) => {
 
     const isHost = room.hostSocketId === socket.id;
 
+    // Check if user has already joined this room (e.g., page refresh)
+    const hasAlreadyJoined = userToken ? room.joinedTokens.has(userToken) : false;
+    if (userToken) {
+      room.joinedTokens.add(userToken);
+    }
+
     currentUser = {
       id: socket.id,
       token: userToken,
       name: username || `User-${socket.id.substring(0, 4)}`,
-      color: getRandomColor(),
+      hasCustomName: Boolean(username && username.trim()),
+      color: getColorForToken(userToken),
       isHost: isHost,
       cursor: { line: 1, ch: 1 },
       joinedAt: Date.now()
@@ -164,39 +211,57 @@ io.on('connection', (socket) => {
 
     room.users.set(socket.id, currentUser);
 
+    // Security check: If live code sharing is disabled, notify guest and hold in standby
+    if (!isHost && !room.settings.liveSharingEnabled) {
+      socket.emit('room-error', { 
+        message: 'Live Code Sharing is currently turned OFF by the host. Access is paused.',
+        code: 'LIVE_SHARING_OFF'
+      });
+      return;
+    }
+
     // Send initial room state to joining user
     socket.emit('room-state', {
       roomId: room.id,
       code: room.code,
+      activeFile: room.activeFile,
       language: room.language,
+      files: room.files || [],
+      cwd: room.cwd || '/home/pyodide',
       settings: room.settings,
       currentUser: currentUser,
       isHost: currentUser.isHost,
-      users: Array.from(room.users.values()),
+      users: getActiveRoomUsers(room),
       chat: room.chat
     });
 
-    // Notify room of new user
+    // Notify room of user list update
     io.to(cleanRoomId).emit('users-update', {
-      users: Array.from(room.users.values())
+      users: getActiveRoomUsers(room)
     });
 
-    // Send system message in chat
-    const sysMessage = {
-      id: Date.now().toString(),
-      sender: 'System',
-      text: `${currentUser.name} joined the room.`,
-      isSystem: true,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
-    room.chat.push(sysMessage);
-    io.to(cleanRoomId).emit('chat-message', sysMessage);
+    // Send system message in chat:
+    // Only send join message if user is host or if a custom username was already supplied (and user hasn't already joined)
+    if (room.settings.liveSharingEnabled && !hasAlreadyJoined && (isHost || (username && username.trim()))) {
+      const sysMessage = {
+        id: Date.now().toString(),
+        sender: 'System',
+        text: `${currentUser.name} joined the room.`,
+        isSystem: true,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+      room.chat.push(sysMessage);
+      socket.to(cleanRoomId).emit('chat-message', sysMessage);
+    }
   });
 
   // Code Change Sync
-  socket.on('code-change', ({ code, cursor }) => {
+  socket.on('code-change', ({ code, cursor, activeFile }) => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
     const room = rooms.get(currentRoomId);
+
+    // Stop live code sharing if host turned it OFF
+    if (!room.settings.liveSharingEnabled) return;
 
     // If read-only mode is active and user is not host
     if (room.settings.readOnly && room.hostSocketId !== socket.id) {
@@ -205,6 +270,10 @@ io.on('connection', (socket) => {
     }
 
     room.code = code;
+    if (activeFile) {
+      room.activeFile = activeFile;
+    }
+    
     if (currentUser && cursor) {
       currentUser.cursor = cursor;
     }
@@ -213,13 +282,24 @@ io.on('connection', (socket) => {
     socket.to(currentRoomId).emit('code-update', {
       code: code,
       senderId: socket.id,
-      cursor: cursor
+      cursor: cursor,
+      activeFile: room.activeFile
     });
+  });
+
+  socket.on('file-system-sync', ({ files, cwd }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    room.files = files;
+    room.cwd = cwd;
+    socket.to(currentRoomId).emit('file-system-update', { files, cwd });
   });
 
   // Cursor position updates
   socket.on('cursor-change', (cursor) => {
     if (!currentRoomId || !currentUser || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
     currentUser.cursor = cursor;
     socket.to(currentRoomId).emit('cursor-update', {
       userId: socket.id,
@@ -229,12 +309,16 @@ io.on('connection', (socket) => {
 
   socket.on('clear-selections', () => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
     socket.to(currentRoomId).emit('clear-selections');
   });
 
   // Real-time mouse movement tracking
   socket.on('mouse-move', ({ x, y }) => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
     socket.to(currentRoomId).emit('mouse-update', {
       userId: socket.id,
       x: x,
@@ -245,6 +329,8 @@ io.on('connection', (socket) => {
   // Real-time scrolling sync
   socket.on('scroll-sync', ({ top, left }) => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
     socket.to(currentRoomId).emit('scroll-update', {
       userId: socket.id,
       top: top,
@@ -307,11 +393,65 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('update-username', ({ username }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId) || !currentUser) return;
+    const room = rooms.get(currentRoomId);
+    const cleanName = (username || '').trim();
+    if (cleanName) {
+      const wasCustomSet = currentUser.hasCustomName;
+      currentUser.name = cleanName;
+      currentUser.hasCustomName = true;
+      io.to(currentRoomId).emit('users-update', {
+        users: getActiveRoomUsers(room)
+      });
+
+      // If guest just gave their custom username for the first time in an active live session, announce in chat
+      if (!wasCustomSet && !currentUser.isHost && room.settings.liveSharingEnabled) {
+        const sysMessage = {
+          id: Date.now().toString(),
+          sender: 'System',
+          text: `${currentUser.name} joined the room.`,
+          isSystem: true,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        };
+        room.chat.push(sysMessage);
+        io.to(currentRoomId).emit('chat-message', sysMessage);
+      }
+    }
+  });
+
   socket.on('request-terminate-code', () => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
     const room = rooms.get(currentRoomId);
+    
+    // Unblock any pending inputs for this room if execution is terminated
+    if (pendingInputs.has(currentRoomId)) {
+      const pending = pendingInputs.get(currentRoomId);
+      clearTimeout(pending.timeoutId);
+      pendingInputs.delete(currentRoomId);
+      pending.res.send('\n');
+    }
+    
     if (room.hostSocketId) {
       io.to(room.hostSocketId).emit('terminate-on-host');
+    }
+  });
+
+  socket.on('request-shell-command', ({ command, currentCode, activeFile, skipPrompt }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (room.hostSocketId) {
+      io.to(room.hostSocketId).emit('execute-shell', { command, currentCode, activeFile, skipPrompt });
+    }
+  });
+
+  socket.on('provide-input', ({ text }) => {
+    if (!currentRoomId) return;
+    if (pendingInputs.has(currentRoomId)) {
+      const pending = pendingInputs.get(currentRoomId);
+      clearTimeout(pending.timeoutId);
+      pendingInputs.delete(currentRoomId);
+      pending.res.send(text);
     }
   });
 
@@ -322,6 +462,43 @@ io.on('connection', (socket) => {
 
     // Merge settings
     room.settings = { ...room.settings, ...newSettings };
+
+    // If host disabled live sharing, send notice to guests
+    if (newSettings.liveSharingEnabled === false) {
+      for (const [sockId, usr] of room.users.entries()) {
+        if (!usr.isHost && sockId !== room.hostSocketId) {
+          const guestSock = io.sockets.sockets.get(sockId);
+          if (guestSock) {
+            guestSock.emit('room-error', { 
+              message: 'The host has turned OFF Live Code Sharing. Access is paused.',
+              code: 'LIVE_SHARING_OFF'
+            });
+          }
+        }
+      }
+    } else if (newSettings.liveSharingEnabled === true) {
+      // If host re-enabled live sharing, re-admit all connected guest sockets with full room state
+      for (const [sockId, usr] of room.users.entries()) {
+        if (!usr.isHost && sockId !== room.hostSocketId) {
+          const guestSock = io.sockets.sockets.get(sockId);
+          if (guestSock) {
+            guestSock.emit('live-sharing-resumed', {
+              roomId: room.id,
+              code: room.code,
+              activeFile: room.activeFile,
+              language: room.language,
+              files: room.files || [],
+              cwd: room.cwd || '/home/pyodide',
+              settings: room.settings,
+              currentUser: usr,
+              isHost: false,
+              users: getActiveRoomUsers(room),
+              chat: room.chat
+            });
+          }
+        }
+      }
+    }
 
     // Broadcast settings update to everyone in room
     io.to(currentRoomId).emit('settings-update', {
@@ -411,16 +588,18 @@ io.on('connection', (socket) => {
           if (rooms.has(currentRoomId)) {
             const currentRoom = rooms.get(currentRoomId);
             if (currentRoom.hostSocketId === null && currentRoom.users.size > 0) {
-              const remainingUsers = Array.from(currentRoom.users.values());
-              const newHost = remainingUsers[0];
-              currentRoom.hostSocketId = newHost.id;
-              currentRoom.hostToken = newHost.token;
-              newHost.isHost = true;
+              const remainingUsers = getActiveRoomUsers(currentRoom);
+              if (remainingUsers.length > 0) {
+                const newHost = remainingUsers[0];
+                currentRoom.hostSocketId = newHost.id;
+                currentRoom.hostToken = newHost.token;
+                newHost.isHost = true;
 
-              io.to(newHost.id).emit('host-assigned', { isHost: true });
-              io.to(currentRoomId).emit('users-update', {
-                users: Array.from(currentRoom.users.values())
-              });
+                io.to(newHost.id).emit('host-assigned', { isHost: true });
+                io.to(currentRoomId).emit('users-update', {
+                  users: getActiveRoomUsers(currentRoom)
+                });
+              }
             }
           }
         }, 15000);
@@ -435,18 +614,44 @@ io.on('connection', (socket) => {
         }, 3600000);
       } else {
         io.to(currentRoomId).emit('users-update', {
-          users: Array.from(room.users.values())
+          users: getActiveRoomUsers(room)
         });
-        if (currentUser) {
-          const sysMsg = {
-            id: Date.now().toString(),
-            sender: 'System',
-            text: `${currentUser.name} left the room.`,
-            isSystem: true,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          };
-          room.chat.push(sysMsg);
-          io.to(currentRoomId).emit('chat-message', sysMsg);
+        if (currentUser && currentUser.token && (currentUser.isHost || currentUser.hasCustomName) && room.settings.liveSharingEnabled) {
+          const departingUserToken = currentUser.token;
+          const departingUserName = currentUser.name;
+          const targetRoomId = currentRoomId;
+
+          // Clear previous timer for this user token if any exists
+          if (room.leaveTimers && room.leaveTimers.has(departingUserToken)) {
+            clearTimeout(room.leaveTimers.get(departingUserToken));
+            room.leaveTimers.delete(departingUserToken);
+          }
+
+          // Grace period to check if user simply refreshed the browser
+          const timerId = setTimeout(() => {
+            if (rooms.has(targetRoomId)) {
+              const currentRoom = rooms.get(targetRoomId);
+              if (currentRoom.leaveTimers) {
+                currentRoom.leaveTimers.delete(departingUserToken);
+              }
+              const isStillPresent = Array.from(currentRoom.users.values()).some(u => u.token === departingUserToken);
+              if (!isStillPresent && currentRoom.settings.liveSharingEnabled) {
+                const sysMsg = {
+                  id: Date.now().toString(),
+                  sender: 'System',
+                  text: `${departingUserName} left the room.`,
+                  isSystem: true,
+                  timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                };
+                currentRoom.chat.push(sysMsg);
+                io.to(targetRoomId).emit('chat-message', sysMsg);
+              }
+            }
+          }, 2500);
+
+          if (room.leaveTimers) {
+            room.leaveTimers.set(departingUserToken, timerId);
+          }
         }
       }
     }

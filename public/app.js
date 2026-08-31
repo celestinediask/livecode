@@ -22,12 +22,19 @@ document.addEventListener('DOMContentLoaded', () => {
   let isCopyDisabled = true;
   let isPasteDisabled = false;
   let isReadOnly = false;
+  let isLiveSharingEnabled = false;
   let roomCode = '';
   let roomLanguage = 'python';
   let usersList = [];
   let isSyntaxHighlightEnabled = true;
   let activeSelection = null;
   let activeRestingCursorUserId = null;
+  let lastTypingTime = 0;
+  let currentActiveFile = 'Untitled';
+  let openTabs = ['Untitled'];
+  const unsavedFiles = new Set();
+  const fileSavedContents = new Map();
+  const tabBufferMap = new Map();
   const remoteCursors = new Map();
 
   // DOM Element References
@@ -44,13 +51,22 @@ document.addEventListener('DOMContentLoaded', () => {
   const toggleCopyProtection = document.getElementById('toggleCopyProtection');
   const togglePasteProtection = document.getElementById('togglePasteProtection');
   const toggleReadOnly = document.getElementById('toggleReadOnly');
+  const toggleLiveSharing = document.getElementById('toggleLiveSharing');
   const toggleSyntaxHighlight = document.getElementById('toggleSyntaxHighlight');
   const copyProtectionToggleLabel = document.getElementById('copyProtectionToggleLabel');
 
   // Actions & Buttons
+  const formatCodeBtn = document.getElementById('formatCodeBtn');
   const runCodeBtn = document.getElementById('runCodeBtn');
   const downloadCodeBtn = document.getElementById('downloadCodeBtn');
   const copyCodeBtn = document.getElementById('copyCodeBtn');
+  
+  const profileBtn = document.getElementById('profileBtn');
+  const profileDropdown = document.getElementById('profileDropdown');
+
+  const settingsBtn = document.getElementById('settingsBtn');
+  const settingsDropdown = document.getElementById('settingsDropdown');
+  const toggleFilesBtn = document.getElementById('toggleFilesBtn');
   const toggleUsersBtn = document.getElementById('toggleUsersBtn');
   const toggleChatBtn = document.getElementById('toggleChatBtn');
   const activeUserCount = document.getElementById('activeUserCount');
@@ -72,7 +88,10 @@ document.addEventListener('DOMContentLoaded', () => {
   persistentCursorEl.style.display = 'none';
   const persistentCaret = document.createElement('div');
   persistentCaret.className = 'collaborator-caret';
+  const persistentFlag = document.createElement('div');
+  persistentFlag.className = 'collaborator-flag';
   persistentCursorEl.appendChild(persistentCaret);
+  persistentCursorEl.appendChild(persistentFlag);
   
   // Wait to append until we're sure the container is ready
   setTimeout(() => {
@@ -92,9 +111,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const newRoomLanguage = document.getElementById('newRoomLanguage');
   const modalCopyDisabled = document.getElementById('modalCopyDisabled');
 
-  // Generate random username if blank
-  const defaultNames = ['Coder', 'Dev', 'Hacker', 'Ninja', 'Byte', 'Pixel', 'Architect'];
-  const randomName = `${defaultNames[Math.floor(Math.random() * defaultNames.length)]}_${Math.floor(Math.random() * 899 + 100)}`;
+  // Retrieve saved username from localStorage
+  let savedUsername = '';
+  try { savedUsername = (localStorage.getItem('livecode_username') || '').trim(); } catch(e){}
 
   // --------------------------------------------------------------------------
   // 1. Initial Room Joining (Direct Website Access without Modal Popup)
@@ -104,9 +123,9 @@ document.addEventListener('DOMContentLoaded', () => {
   updateEditorDisplay();
 
   if (!currentRoomId) {
-    autoCreateAndJoinRoom(randomName);
+    autoCreateAndJoinRoom(savedUsername || 'User');
   } else {
-    joinRoom(currentRoomId, randomName);
+    joinRoom(currentRoomId, savedUsername);
   }
 
   async function autoCreateAndJoinRoom(username) {
@@ -139,16 +158,33 @@ document.addEventListener('DOMContentLoaded', () => {
 
   socket.on('room-state', (state) => {
     currentRoomId = state.roomId;
-    displayRoomId.textContent = state.roomId.toUpperCase();
+    if (displayRoomId) displayRoomId.textContent = state.roomId.toUpperCase();
     
     roomCode = state.code;
     codeTextarea.value = roomCode;
+    
+    if (state.activeFile) currentActiveFile = state.activeFile;
+    if (!openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
+    if (state.files && state.files.length > 0) {
+      shellFiles = state.files;
+    } else {
+      shellFiles = [];
+    }
+    if (state.cwd) currentShellCwd = state.cwd;
+    renderFilesList();
+    renderTabs();
     
     roomLanguage = state.language;
     languageSelect.value = roomLanguage;
 
     currentUser = state.currentUser;
     isHost = state.isHost;
+
+    // Show guest username modal if joining a live shared session without a saved username
+    if (!isHost && !savedUsername && state.settings && state.settings.liveSharingEnabled) {
+      promptGuestUsernameModal();
+    }
+
     updateRoleBadge();
     if (isHost) {
       getOrInitWorker();
@@ -164,13 +200,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initial Syntax Highlight & Line Count
     updateEditorDisplay();
+
+    // Auto-show terminal on fresh start if python
+    if (roomLanguage === 'python') {
+      outputDrawer.classList.remove('collapsed');
+      htmlPreviewContainer.classList.add('hidden');
+      consoleOutput.classList.remove('hidden');
+      if (isHost && !isExecutionRunning) {
+        startShellMode();
+      }
+    }
   });
 
   socket.on('settings-update', ({ settings, updatedBy }) => {
     applyProtectionSettings(settings);
   });
 
-  socket.on('code-update', ({ code, senderId, cursor }) => {
+  socket.on('code-update', ({ code, senderId, cursor, activeFile }) => {
+    if (activeFile) {
+      currentActiveFile = activeFile;
+      if (!openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
+      renderFilesList();
+      renderTabs();
+    }
     if (senderId !== socket.id) {
       const cursorPos = codeTextarea.selectionStart;
       codeTextarea.value = code;
@@ -181,8 +233,16 @@ document.addEventListener('DOMContentLoaded', () => {
         const user = usersList.find(u => u.id === senderId);
         if (user) {
           activeRestingCursorUserId = senderId;
+          lastTypingTime = Date.now();
           user.cursor = cursor;
           remoteCursors.set(senderId, { cursor: cursor, name: user.name, color: user.color, isInsideEditor: true });
+          
+          if (window._remoteTypingTimer) clearTimeout(window._remoteTypingTimer);
+          window._remoteTypingTimer = setTimeout(() => {
+            activeRestingCursorUserId = null;
+            renderCollaboratorCursors();
+            renderUsers();
+          }, 1500);
         }
       }
       
@@ -215,6 +275,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     renderUsers();
     renderCollaboratorCursors();
+  });
+
+  socket.on('file-system-update', ({ files, cwd }) => {
+    shellFiles = files && files.length > 0 ? files : [];
+    try { localStorage.setItem('livecode_files', JSON.stringify(shellFiles)); } catch(e){}
+    currentShellCwd = cwd;
+    renderFilesList();
   });
 
   socket.on('cursor-update', ({ userId, cursor }) => {
@@ -309,6 +376,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  socket.on('execute-shell', ({ command, currentCode, activeFile, skipPrompt }) => {
+    if (isHost) {
+      const worker = getOrInitWorker();
+      if (worker) worker.postMessage({ type: 'shell', command: command, currentCode: currentCode, activeFile: activeFile || currentActiveFile, skipPrompt: skipPrompt });
+    }
+  });
+
   socket.on('terminate-on-host', () => {
     if (isHost && isExecutionRunning) {
       terminateExecution();
@@ -317,6 +391,102 @@ document.addEventListener('DOMContentLoaded', () => {
 
   socket.on('protection-alert', ({ message }) => {
     showToast(message, 'warning');
+  });
+
+  socket.on('room-error', ({ message, code }) => {
+    showToast(`🔒 ${message}`, 'error');
+    if (code === 'LIVE_SHARING_OFF') {
+      const guestUsernameModal = document.getElementById('guestUsernameModal');
+      if (guestUsernameModal) {
+        guestUsernameModal.classList.remove('hidden');
+        guestUsernameModal.innerHTML = `
+          <div style="background: var(--bg-card, #12151e); border: 1px solid var(--border-color, #272d3d); border-radius: 8px; padding: 24px; max-width: 440px; width: 90%; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+            <h3 style="margin-top: 0; color: #ef4444; font-size: 1.25rem;">🔒 Access Denied</h3>
+            <p style="color: var(--text-muted, #94a3b8); font-size: 0.95rem; margin-bottom: 0; line-height: 1.5;">${message}</p>
+          </div>
+        `;
+      }
+    }
+  });
+
+  function promptGuestUsernameModal() {
+    const guestUsernameModal = document.getElementById('guestUsernameModal');
+    if (!guestUsernameModal) return;
+
+    guestUsernameModal.innerHTML = `
+      <div style="background: var(--bg-card, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 12px; padding: 24px; width: 90%; max-width: 400px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); text-align: center;">
+        <div style="font-size: 2rem; margin-bottom: 8px;">👤</div>
+        <h3 style="margin: 0 0 8px 0; color: var(--text-primary, #f8fafc); font-size: 1.25rem;">Enter Your Username</h3>
+        <p style="margin: 0 0 16px 0; color: var(--text-muted, #94a3b8); font-size: 0.875rem;">A username is required to join this live code sharing session.</p>
+        <form id="guestUsernameForm" onsubmit="event.preventDefault();">
+          <input type="text" id="guestUsernameInput" placeholder="Enter username..." maxlength="30" autocomplete="off" style="width: 100%; padding: 10px 14px; border-radius: 6px; border: 1px solid var(--border-color, #334155); background: var(--bg-surface, #0f172a); color: var(--text-primary, #f8fafc); font-size: 0.95rem; margin-bottom: 16px; outline: none; box-sizing: border-box;">
+          <button type="submit" id="submitGuestUsernameBtn" class="btn btn-primary" style="width: 100%; padding: 10px; font-weight: 600; cursor: pointer;">Join Live Session</button>
+        </form>
+      </div>
+    `;
+
+    guestUsernameModal.classList.remove('hidden');
+    const input = document.getElementById('guestUsernameInput');
+    const form = document.getElementById('guestUsernameForm');
+    if (input) setTimeout(() => input.focus(), 100);
+
+    if (form) {
+      form.onsubmit = (e) => {
+        e.preventDefault();
+        const cleanName = (input ? input.value : '').trim();
+        if (!cleanName) return;
+        
+        savedUsername = cleanName;
+        if (currentUser) currentUser.name = cleanName;
+        try { localStorage.setItem('livecode_username', cleanName); } catch(err){}
+        socket.emit('update-username', { username: cleanName });
+        guestUsernameModal.classList.add('hidden');
+        updateRoleBadge();
+        renderUsers();
+      };
+    }
+  }
+
+  socket.on('live-sharing-resumed', (state) => {
+    showToast('🟢 Live Code Sharing resumed by Host!');
+    
+    currentRoomId = state.roomId;
+    if (displayRoomId) displayRoomId.textContent = state.roomId.toUpperCase();
+    
+    roomCode = state.code;
+    codeTextarea.value = roomCode;
+    
+    if (state.activeFile) currentActiveFile = state.activeFile;
+    if (!openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
+    if (state.files && state.files.length > 0) {
+      shellFiles = state.files;
+    }
+    if (state.cwd) currentShellCwd = state.cwd;
+    renderFilesList();
+    renderTabs();
+    
+    roomLanguage = state.language;
+    languageSelect.value = roomLanguage;
+
+    currentUser = state.currentUser;
+    isHost = state.isHost;
+
+    if (!isHost && !savedUsername) {
+      promptGuestUsernameModal();
+    } else {
+      const guestUsernameModal = document.getElementById('guestUsernameModal');
+      if (guestUsernameModal) {
+        guestUsernameModal.classList.add('hidden');
+      }
+    }
+
+    updateRoleBadge();
+    applyProtectionSettings(state.settings);
+    
+    usersList = state.users || [];
+    renderUsers();
+    renderChat(state.chat || []);
+    updateEditorDisplay();
   });
 
   socket.on('chat-message', (msg) => {
@@ -354,15 +524,30 @@ document.addEventListener('DOMContentLoaded', () => {
     if (htmlPreviewContainer) htmlPreviewContainer.classList.add('hidden');
 
     if (data.action === 'clear') {
-      if (data.message) {
-        consoleOutput.innerHTML = `<div class="console-line system">${data.message}</div>`;
-      } else {
-        consoleOutput.innerHTML = '';
+      if (terminal) {
+        terminal.reset();
+        if (data.message) {
+          terminal.write(`\x1b[36m${data.message}\x1b[0m\r\n`);
+        }
       }
     } else if (data.action === 'append') {
       appendConsoleLine(data.type, data.text, true);
     } else if (data.action === 'status') {
       updateOutputStatus(data.status, data.text, true);
+    } else if (data.action === 'input_request') {
+      if (data.text && terminal) {
+        // Write prompt text inline without a newline
+        terminal.write(`\x1b[36m${data.text}\x1b[0m`);
+      }
+      showConsoleInput();
+    } else if (data.action === 'shell_prompt') {
+      if (data.text && terminal) {
+        terminal.write(`\x1b[32m${data.text}\x1b[0m`);
+      }
+      isShellMode = true;
+      showConsoleInput();
+    } else if (data.action === 'input_resolved') {
+      hideConsoleInput();
     }
   });
 
@@ -374,6 +559,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (settings.copyDisabled !== undefined) isCopyDisabled = settings.copyDisabled;
     if (settings.pasteDisabled !== undefined) isPasteDisabled = settings.pasteDisabled;
     if (settings.readOnly !== undefined) isReadOnly = settings.readOnly;
+    if (settings.liveSharingEnabled !== undefined) isLiveSharingEnabled = settings.liveSharingEnabled;
     if (settings.syntaxHighlight !== undefined) {
       isSyntaxHighlightEnabled = settings.syntaxHighlight;
       updateEditorDisplay();
@@ -383,6 +569,9 @@ document.addEventListener('DOMContentLoaded', () => {
     toggleCopyProtection.checked = isCopyDisabled;
     togglePasteProtection.checked = isPasteDisabled;
     toggleReadOnly.checked = isReadOnly;
+    if (toggleLiveSharing) {
+      toggleLiveSharing.checked = isLiveSharingEnabled;
+    }
     if (toggleSyntaxHighlight) {
       toggleSyntaxHighlight.checked = isSyntaxHighlightEnabled;
     }
@@ -391,6 +580,9 @@ document.addEventListener('DOMContentLoaded', () => {
     toggleCopyProtection.disabled = !isHost;
     togglePasteProtection.disabled = !isHost;
     toggleReadOnly.disabled = !isHost;
+    if (toggleLiveSharing) {
+      toggleLiveSharing.disabled = !isHost;
+    }
     if (toggleSyntaxHighlight) {
       toggleSyntaxHighlight.disabled = !isHost;
     }
@@ -404,10 +596,25 @@ document.addEventListener('DOMContentLoaded', () => {
       codeTextarea.removeAttribute('draggable');
     }
     
-    if (isCopyDisabled) {
-      protectionBanner.classList.remove('hidden');
+    if (protectionBanner) {
+      if (isCopyDisabled) {
+        protectionBanner.classList.remove('hidden');
+      } else {
+        protectionBanner.classList.add('hidden');
+      }
+    }
+
+    // Apply Live Code Sharing UI states
+    const pulseDot = document.querySelector('.pulse-dot');
+    if (displayRoomId && currentRoomId) {
+      displayRoomId.textContent = currentRoomId.toUpperCase();
+    }
+    if (isLiveSharingEnabled) {
+      if (pulseDot) pulseDot.classList.remove('off');
+      if (roomShareBtn) roomShareBtn.classList.remove('live-sharing-off');
     } else {
-      protectionBanner.classList.add('hidden');
+      if (pulseDot) pulseDot.classList.add('off');
+      if (roomShareBtn) roomShareBtn.classList.add('live-sharing-off');
     }
 
     // Apply Read-Only mode
@@ -418,6 +625,8 @@ document.addEventListener('DOMContentLoaded', () => {
       document.body.classList.remove('read-only-mode');
       codeTextarea.readOnly = false;
     }
+
+    renderUsers();
 
     // Update Download Button State (Only enabled if host allowed copying or user is host)
     // Update Download & Copy Buttons State (Only enabled if host allowed copying or user is host)
@@ -464,6 +673,34 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!isHost) return;
     socket.emit('update-settings', { readOnly: toggleReadOnly.checked });
   });
+
+  let hasPromptedUsernameOnLiveShare = false;
+
+  if (toggleLiveSharing) {
+    toggleLiveSharing.addEventListener('change', () => {
+      if (!isHost) return;
+      if (toggleLiveSharing.checked) {
+        if (!hasPromptedUsernameOnLiveShare && !savedUsername) {
+          const inputName = prompt('Enter your username for Live Code Sharing:', '');
+          if (inputName && inputName.trim()) {
+            const cleanName = inputName.trim();
+            savedUsername = cleanName;
+            if (currentUser) currentUser.name = cleanName;
+            try { localStorage.setItem('livecode_username', cleanName); } catch(e){}
+            socket.emit('update-username', { username: cleanName });
+            updateRoleBadge();
+            hasPromptedUsernameOnLiveShare = true;
+          } else {
+            // User canceled or entered empty username: revert toggle state
+            toggleLiveSharing.checked = false;
+            showToast('⚠️ Live Code Sharing requires a username.', 'warning');
+            return;
+          }
+        }
+      }
+      socket.emit('update-settings', { liveSharingEnabled: toggleLiveSharing.checked });
+    });
+  }
 
   if (toggleSyntaxHighlight) {
     toggleSyntaxHighlight.addEventListener('change', () => {
@@ -606,10 +843,19 @@ document.addEventListener('DOMContentLoaded', () => {
   // --------------------------------------------------------------------------
   // 4. Editor Highlighting & Real-Time Sync Logic
   // --------------------------------------------------------------------------
-
   codeTextarea.addEventListener('input', () => {
     activeRestingCursorUserId = socket.id;
     roomCode = codeTextarea.value;
+    if (currentActiveFile) {
+      tabBufferMap.set(currentActiveFile, roomCode);
+      const savedContent = fileSavedContents.get(currentActiveFile);
+      if (savedContent !== undefined && savedContent === roomCode) {
+        unsavedFiles.delete(currentActiveFile);
+      } else {
+        unsavedFiles.add(currentActiveFile);
+      }
+      renderTabs();
+    }
     updateEditorDisplay();
 
     // Calculate line & character cursor & selection
@@ -624,12 +870,113 @@ document.addEventListener('DOMContentLoaded', () => {
     // Emit live changes to server
     socket.emit('code-change', {
       code: roomCode,
-      cursor: { line, ch, selection }
+      cursor: { line, ch, selection },
+      activeFile: currentActiveFile
     });
   });
 
-  // Tab key indent support inside textarea
+  function formatCode() {
+    if (isReadOnly && !isHost) {
+      showToast('⚠️ Editor is currently in read-only mode.', 'warning');
+      return;
+    }
+    const raw = codeTextarea.value;
+    if (!raw.trim()) return;
+
+    try {
+      const lines = raw.split('\n');
+      const formattedLines = [];
+      let indentLevel = 0;
+      let inMultiLineString = false;
+      let multiLineQuote = '';
+
+      for (let i = 0; i < lines.length; i++) {
+        let line = lines[i];
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+          formattedLines.push('');
+          continue;
+        }
+
+        // Handle multiline string literals (""" or ''')
+        if (inMultiLineString) {
+          formattedLines.push(line);
+          if (trimmed.includes(multiLineQuote)) {
+            inMultiLineString = false;
+            multiLineQuote = '';
+          }
+          continue;
+        }
+
+        if (trimmed.startsWith('"""') || trimmed.startsWith("'''")) {
+          const quote = trimmed.substring(0, 3);
+          const rest = trimmed.substring(3);
+          if (!rest.includes(quote)) {
+            inMultiLineString = true;
+            multiLineQuote = quote;
+          }
+        }
+
+        // Decrease indent for dedent keywords (elif, else, except, finally)
+        if (/^(elif|else|except|finally)\b/.test(trimmed) || /^(\]|\}|\))/.test(trimmed)) {
+          indentLevel = Math.max(0, indentLevel - 1);
+        }
+
+        // Format line with 2-space indentation
+        formattedLines.push('  '.repeat(indentLevel) + trimmed);
+
+        // Increase indent if line ends with a colon (and is not inside a string/comment)
+        if (trimmed.endsWith(':') && !trimmed.startsWith('#')) {
+          indentLevel++;
+        }
+      }
+
+      const formatted = formattedLines.join('\n');
+      if (formatted !== raw) {
+        const selStart = codeTextarea.selectionStart;
+        const selEnd = codeTextarea.selectionEnd;
+        codeTextarea.value = formatted;
+        codeTextarea.selectionStart = Math.min(selStart, formatted.length);
+        codeTextarea.selectionEnd = Math.min(selEnd, formatted.length);
+        codeTextarea.dispatchEvent(new Event('input'));
+        showToast('✨ Code formatted (Shift+Alt+F)');
+      } else {
+        showToast('✨ Code is already formatted');
+      }
+    } catch (err) {
+      showToast('⚠️ Formatting encountered an issue.', 'warning');
+    }
+  }
+
+  if (formatCodeBtn) {
+    formatCodeBtn.addEventListener('click', () => {
+      formatCode();
+    });
+  }
+
+  // Tab key indent, Ctrl+S save, and formatting shortcuts inside textarea
   codeTextarea.addEventListener('keydown', (e) => {
+    const isCmdOrCtrl = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+
+    // Formatting shortcuts: Shift+Alt+F or Ctrl+Shift+I / Cmd+Shift+I or Ctrl+Shift+F
+    if (
+      (e.shiftKey && e.altKey && key === 'f') ||
+      (isCmdOrCtrl && e.shiftKey && (key === 'i' || key === 'f'))
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      formatCode();
+      return;
+    }
+
+    if (isCmdOrCtrl && key === 's') {
+      e.preventDefault();
+      e.stopPropagation();
+      saveActiveFile();
+      return;
+    }
     if (e.key === 'Tab') {
       e.preventDefault();
       const start = codeTextarea.selectionStart;
@@ -713,10 +1060,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (isSyntaxHighlightEnabled) {
       codeTextarea.classList.remove('syntax-disabled');
-      highlightCode.className = 'language-python';
-      highlightCode.textContent = codeContent;
       if (window.Prism && Prism.languages.python) {
-        Prism.highlightElement(highlightCode);
+        try {
+          highlightCode.innerHTML = Prism.highlight(codeContent, Prism.languages.python, 'python');
+        } catch (e) {
+          highlightCode.textContent = "PRISM ERROR: " + e.message + " | " + e.stack;
+        }
+      } else {
+        highlightCode.textContent = codeContent;
       }
     } else {
       codeTextarea.classList.add('syntax-disabled');
@@ -728,6 +1079,22 @@ document.addEventListener('DOMContentLoaded', () => {
     highlightCode.parentElement.scrollTop = codeTextarea.scrollTop;
     highlightCode.parentElement.scrollLeft = codeTextarea.scrollLeft;
     lineNumbers.scrollTop = codeTextarea.scrollTop;
+
+    const editorWrapper = document.getElementById('editorWrapper');
+    const editorTabs = document.getElementById('editorTabs');
+    const editorSection = document.querySelector('.editor-section');
+    if (openTabs.length === 0) {
+      if (editorWrapper) editorWrapper.style.visibility = 'hidden';
+      if (editorTabs) editorTabs.style.display = 'none';
+      if (editorSection) editorSection.style.backgroundColor = 'var(--bg-surface)';
+      codeTextarea.disabled = true;
+    } else {
+      if (editorWrapper) editorWrapper.style.visibility = 'visible';
+      if (editorTabs) editorTabs.style.display = 'flex';
+      if (editorSection) editorSection.style.backgroundColor = 'var(--bg-editor)';
+      codeTextarea.disabled = false;
+      codeTextarea.placeholder = 'Write your Python code here...';
+    }
 
     renderCollaboratorCursors();
   }
@@ -857,6 +1224,7 @@ document.addEventListener('DOMContentLoaded', () => {
               <line x1="8" y1="4" x2="16" y2="4"></line>
               <line x1="8" y1="20" x2="16" y2="20"></line>
             </svg>
+            <span class="mouse-pointer-label" style="background-color: ${userColor}; padding: 1px 6px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; color: white; margin-left: 4px;">${escapeHtml(userName)}</span>
           `;
         } else {
           // Outside editor: Standard arrow cursor icon
@@ -864,13 +1232,15 @@ document.addEventListener('DOMContentLoaded', () => {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="${userColor}" stroke="#ffffff" stroke-width="1.5">
               <path d="M3 3l7 18 3-7 7-3L3 3z"/>
             </svg>
+            <span class="mouse-pointer-label" style="background-color: ${userColor}; padding: 1px 6px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; color: white; margin-left: 4px;">${escapeHtml(userName)}</span>
           `;
         }
         mousePointerContainer.appendChild(el);
       }
       
       // RESTING CURSOR at specific line/column (ONLY for the LAST active cursor)
-      if (userId === activeRestingCursorUserId && data.cursor && data.cursor.line) {
+      const isTypingActive = Date.now() - lastTypingTime < 1500;
+      if (isTypingActive && userId === activeRestingCursorUserId && data.cursor && data.cursor.line) {
         const top = (data.cursor.line - 1) * lineHeight + paddingTop - codeTextarea.scrollTop;
         const left = (data.cursor.ch - 1) * charWidth + paddingLeft - codeTextarea.scrollLeft;
 
@@ -878,14 +1248,17 @@ document.addEventListener('DOMContentLoaded', () => {
           persistentCursorEl.style.display = 'flex';
           persistentCursorEl.style.transform = `translate(${left}px, ${top}px)`;
           persistentCaret.style.backgroundColor = userColor;
+          persistentFlag.style.backgroundColor = userColor;
+          persistentFlag.textContent = `${userName} (typing...)`;
         } else {
           persistentCursorEl.style.display = 'none';
         }
       }
     });
     
-    // If active user disconnected, no active user, or active user is local
-    if (!activeRestingCursorUserId || activeRestingCursorUserId === socket.id || !remoteCursors.has(activeRestingCursorUserId)) {
+    // If typing timed out, active user disconnected, no active user, or active user is local
+    const isTypingActive = Date.now() - lastTypingTime < 1500;
+    if (!isTypingActive || !activeRestingCursorUserId || activeRestingCursorUserId === socket.id || !remoteCursors.has(activeRestingCursorUserId)) {
       persistentCursorEl.style.display = 'none';
     }
   }
@@ -951,34 +1324,189 @@ document.addEventListener('DOMContentLoaded', () => {
       let pyodide = null;
 
       self.onmessage = async function(e) {
-        const { type, code } = e.data;
+        const { type, code, roomId, origin } = e.data;
+        if (roomId) self.currentRoomId = roomId;
+        if (origin) self.originUrl = origin;
+        const initPyodide = async () => {
+          self.postMessage({ type: 'status', text: 'initializing' });
+          pyodide = await loadPyodide({
+            stdout: (text) => self.postMessage({ type: 'stdout', text: text }),
+            stderr: (text) => self.postMessage({ type: 'stderr', text: text })
+          });
+          
+          await pyodide.runPythonAsync(\`
+import builtins
+import json
+from js import XMLHttpRequest, eval as js_eval
+
+def custom_input(prompt_text=""):
+    xhr = XMLHttpRequest.new()
+    target_url = js_eval("self.originUrl || ''") + "/api/sync-input"
+    xhr.open("POST", target_url, False)
+    xhr.setRequestHeader("Content-Type", "application/json")
+    room_id = js_eval("self.currentRoomId || ''")
+    payload = json.dumps({"roomId": str(room_id), "promptText": str(prompt_text)})
+    xhr.send(payload)
+    if xhr.status == 200:
+        return xhr.responseText.rstrip('\\\\n')
+    return ""
+builtins.input = custom_input
+          \`);
+
+          try {
+            if (e.data && e.data.activeFile && e.data.activeFile !== 'Untitled' && !e.data.activeFile.startsWith('Untitled')) {
+              if (!pyodide.FS.analyzePath(e.data.activeFile).exists) {
+                pyodide.FS.writeFile(e.data.activeFile, e.data.currentCode || '');
+              }
+            }
+          } catch(err){}
+
+          let files = [];
+          let cwd = '/';
+          try { 
+            files = pyodide.runPython("import os\\ndef scan_files():\\n    res = []\\n    base = '/home/pyodide'\\n    if not os.path.exists(base):\\n        base = '.'\\n    for root, dirs, filenames in os.walk(base):\\n        rel = os.path.relpath(root, base)\\n        prefix = '' if rel == '.' else rel.replace('\\\\\\\\', '/') + '/'\\n        for d in sorted(dirs):\\n            if not d.startswith('.'):\\n                res.append(prefix + d + '/')\\n        for f in sorted(filenames):\\n            if not f.startswith('.'):\\n                res.append(prefix + f)\\n    return res\\nscan_files()").toJs(); 
+            cwd = pyodide.runPython("import os\\nos.getcwd()");
+          } catch(e){}
+          
+          self.postMessage({ type: 'status', text: 'ready', files: Array.from(files), cwd: cwd });
+        };
+
         if (type === 'init') {
           if (!pyodide) {
             try {
-              self.postMessage({ type: 'status', text: 'initializing' });
-              pyodide = await loadPyodide({
-                stdout: (text) => self.postMessage({ type: 'stdout', text: text }),
-                stderr: (text) => self.postMessage({ type: 'stderr', text: text })
-              });
-              self.postMessage({ type: 'status', text: 'ready' });
+              await initPyodide();
             } catch (err) {
               self.postMessage({ type: 'error', error: 'Failed to initialize Python engine.' });
             }
           }
+          if (e.data.files && Array.isArray(e.data.files)) {
+            try {
+              e.data.files.forEach(f => {
+                if (f.endsWith('/')) {
+                  const d = f.slice(0, -1);
+                  pyodide.runPython("import os\\ntry:\\n    os.makedirs('" + d + "', exist_ok=True)\\nexcept Exception:\\n    pass");
+                } else if (f.includes('/')) {
+                  const d = f.split('/').slice(0, -1).join('/');
+                  pyodide.runPython("import os\\ntry:\\n    os.makedirs('" + d + "', exist_ok=True)\\n    if not os.path.exists('" + f + "'):\\n        open('" + f + "', 'a').close()\\nexcept Exception:\\n    pass");
+                } else {
+                  pyodide.runPython("import os\\ntry:\\n    if not os.path.exists('" + f + "'):\\n        open('" + f + "', 'a').close()\\nexcept Exception:\\n    pass");
+                }
+              });
+            } catch (err) {}
+          }
         } else if (type === 'run') {
           try {
             if (!pyodide) {
-              self.postMessage({ type: 'status', text: 'initializing' });
-              pyodide = await loadPyodide({
-                stdout: (text) => self.postMessage({ type: 'stdout', text: text }),
-                stderr: (text) => self.postMessage({ type: 'stderr', text: text })
-              });
-              self.postMessage({ type: 'status', text: 'ready' });
+              await initPyodide();
+            }
+            if (code !== undefined && e.data.activeFile && e.data.activeFile !== 'Untitled' && !e.data.activeFile.startsWith('Untitled')) {
+              pyodide.FS.writeFile(e.data.activeFile, code);
             }
             await pyodide.runPythonAsync(code);
             self.postMessage({ type: 'done' });
           } catch (err) {
             self.postMessage({ type: 'error', error: err.message });
+          }
+        } else if (type === 'shell') {
+          try {
+            if (!pyodide) await initPyodide();
+            
+            const cmd = e.data.command.trim();
+            if (!cmd) {
+              self.postMessage({ type: 'shell_done' });
+              return;
+            }
+            const matchArgs = (str) => {
+              const regex = /(?:[^\\s"']+|"[^"]*"|'[^']*')+/g;
+              const matches = str.match(regex) || [];
+              return matches.map(m => {
+                if ((m.startsWith('"') && m.endsWith('"')) || (m.startsWith("'") && m.endsWith("'"))) {
+                  return m.slice(1, -1);
+                }
+                return m;
+              });
+            };
+            const rawParts = cmd.match(/(?:[^\\s"']+|"[^"]*"|'[^']*')+/g) || [cmd];
+            let action = rawParts[0] ? rawParts[0].trim().replace(/^["']|["']$/g, '').replace(/:$/, '') : '';
+            const parts = rawParts.map(m => (m.startsWith('"') && m.endsWith('"')) || (m.startsWith("'") && m.endsWith("'")) ? m.slice(1, -1) : m);
+            let pyCode = '';
+            if (action === 'ls') {
+              const target = parts[1] || '.';
+              if (!e.data.skipPrompt) {
+                pyCode = "import os\\ntry:\\n    target = " + JSON.stringify(target) + "\\n    items = sorted(os.listdir(target))\\n    res = []\\n    for f in items:\\n        full = os.path.join(target, f)\\n        if os.path.isdir(full):\\n            res.append('\\x1b[1;34m' + f + '/\\x1b[0m')\\n        else:\\n            res.append(f)\\n    print('  '.join(res) if res else '')\\nexcept Exception as err:\\n    print(err)";
+              }
+            } else if (action === 'pwd') {
+              pyCode = "import os\\nprint(os.getcwd())";
+            } else if (action === 'cd') {
+              const dir = parts[1] || '/home/pyodide';
+              pyCode = "import os\\ntry:\\n    target_dir = " + JSON.stringify(dir) + "\\n    if target_dir == '~' or target_dir.startswith('~/'):\\n        target_dir = target_dir.replace('~', '/home/pyodide', 1)\\n    os.chdir(target_dir)\\nexcept Exception as err:\\n    print(err)";
+            } else if (action === 'cat') {
+              const file = parts[1];
+              if (file) pyCode = "try:\\n    with open(" + JSON.stringify(file) + ", 'r') as f:\\n        print(f.read())\\nexcept Exception as err:\\n    print(err)";
+            } else if (action === 'open') {
+              const file = parts[1];
+              if (file) {
+                try {
+                  const content = pyodide.FS.readFile(file, { encoding: 'utf8' });
+                  self.postMessage({ type: 'open_file', filename: file, content: content });
+                } catch (err) {
+                  self.postMessage({ type: 'open_file', filename: file, content: '' });
+                }
+              }
+              let files = [];
+              let cwd = '/';
+              try { 
+                files = pyodide.runPython("import os\\ndef scan_files():\\n    res = []\\n    base = '/home/pyodide'\\n    if not os.path.exists(base):\\n        base = '.'\\n    for root, dirs, filenames in os.walk(base):\\n        rel = os.path.relpath(root, base)\\n        prefix = '' if rel == '.' else rel.replace('\\\\\\\\', '/') + '/'\\n        for d in sorted(dirs):\\n            if not d.startswith('.'):\\n                res.append(prefix + d + '/')\\n        for f in sorted(filenames):\\n            if not f.startswith('.'):\\n                res.append(prefix + f)\\n    return res\\nscan_files()").toJs(); 
+                cwd = pyodide.runPython("import os\\nos.getcwd()");
+              } catch(e){}
+              self.postMessage({ type: 'shell_done', files: Array.from(files), cwd: cwd, skipPrompt: true });
+              return;
+            } else if (action === 'mkdir') {
+              const dir = parts[1];
+              if (dir) pyCode = "import os\\ntry:\\n    os.makedirs(" + JSON.stringify(dir) + ", exist_ok=True)\\nexcept Exception as err:\\n    print(err)";
+            } else if (action === 'touch') {
+              const file = parts[1];
+              if (file) pyCode = "import os\\ntry:\\n    d = os.path.dirname(" + JSON.stringify(file) + ")\\n    if d:\\n        os.makedirs(d, exist_ok=True)\\n    open(" + JSON.stringify(file) + ", 'a').close()\\nexcept Exception as err:\\n    print(err)";
+            } else if (action === 'rmdir') {
+              const dir = parts[1];
+              if (dir) pyCode = "import os\\ntry:\\n    if os.path.isdir(" + JSON.stringify(dir) + "):\\n        if len(os.listdir(" + JSON.stringify(dir) + ")) == 0:\\n            os.rmdir(" + JSON.stringify(dir) + ")\\n        else:\\n            print('rmdir: failed to remove ' + " + JSON.stringify(dir) + " + ': Directory not empty')\\n    else:\\n        print('rmdir: failed to remove ' + " + JSON.stringify(dir) + " + ': Not a directory')\\nexcept Exception as err:\\n    print(err)";
+            } else if (action === 'rm') {
+              const hasRecursive = parts.some(p => p === '-r' || p === '-rf' || p === '-fr' || p === '-R');
+              const targets = parts.slice(1).filter(p => !p.startsWith('-'));
+              const target = targets[0];
+              if (target) {
+                pyCode = "import os, shutil\\ntry:\\n    t = " + JSON.stringify(target) + "\\n    is_rec = " + (hasRecursive ? "True" : "False") + "\\n    if os.path.isdir(t):\\n        if is_rec:\\n            shutil.rmtree(t)\\n        else:\\n            print('rm: cannot remove ' + t + ': Is a directory')\\n    elif os.path.exists(t):\\n        os.remove(t)\\n    else:\\n        if not " + (parts.includes('-f') || parts.includes('-rf') || parts.includes('-fr') ? "True" : "False") + ":\\n            print('rm: cannot remove ' + t + ': No such file or directory')\\nexcept Exception as err:\\n    print(err)";
+              }
+            } else if (action === 'cp') {
+              const src = parts[1];
+              const dst = parts[2];
+              if (src && dst) pyCode = "import shutil\\ntry:\\n    shutil.copy2(" + JSON.stringify(src) + ", " + JSON.stringify(dst) + ")\\nexcept Exception as err:\\n    print(err)";
+            } else if (action === 'mv') {
+              const src = parts[1];
+              const dst = parts[2];
+              if (src && dst) pyCode = "import shutil\\ntry:\\n    shutil.move(" + JSON.stringify(src) + ", " + JSON.stringify(dst) + ")\\nexcept Exception as err:\\n    print(err)";
+            } else if (action === 'echo') {
+              const text = parts.slice(1).join(' ');
+              pyCode = "print(" + JSON.stringify(text) + ")";
+            } else if (action === 'clear') {
+              self.postMessage({ type: 'shell_clear' });
+              return;
+            } else {
+              self.postMessage({ type: 'stderr', text: "bash: " + action + ": command not found" });
+            }
+            if (pyCode) {
+              await pyodide.runPythonAsync(pyCode);
+            }
+            let files = [];
+            let cwd = '/';
+            try { 
+              files = pyodide.runPython("import os\\ndef scan_files():\\n    res = []\\n    base = '/home/pyodide'\\n    if not os.path.exists(base):\\n        base = '.'\\n    for root, dirs, filenames in os.walk(base):\\n        rel = os.path.relpath(root, base)\\n        prefix = '' if rel == '.' else rel.replace('\\\\\\\\', '/') + '/'\\n        for d in sorted(dirs):\\n            if not d.startswith('.'):\\n                res.append(prefix + d + '/')\\n        for f in sorted(filenames):\\n            if not f.startswith('.'):\\n                res.append(prefix + f)\\n    return res\\nscan_files()").toJs(); 
+              cwd = pyodide.runPython("import os\\nos.getcwd()");
+            } catch(e){}
+            self.postMessage({ type: 'shell_done', files: Array.from(files), cwd: cwd, skipPrompt: e.data.skipPrompt || false });
+          } catch (err) {
+            self.postMessage({ type: 'stderr', text: err.message });
+            self.postMessage({ type: 'shell_done' });
           }
         }
       };
@@ -995,35 +1523,81 @@ document.addEventListener('DOMContentLoaded', () => {
       activeExecutionWorker = new Worker(pyodideWorkerBlobUrl);
 
       activeExecutionWorker.onmessage = (e) => {
-        const { type, text, error } = e.data;
-        if (type === 'status') {
+        if (e.data.type === 'status') {
+          const { text } = e.data;
           if (text === 'initializing' && isExecutionRunning) {
             updateOutputStatus('running', 'Initializing...');
           } else if (text === 'ready') {
+            if (e.data.files && e.data.files.length > 0) {
+              const merged = Array.from(new Set([...shellFiles, ...e.data.files]));
+              shellFiles = merged;
+              try { localStorage.setItem('livecode_files', JSON.stringify(shellFiles)); } catch(e){}
+              renderFilesList();
+            }
+            if (e.data.cwd) currentShellCwd = e.data.cwd;
+            renderFilesList();
+            socket.emit('file-system-sync', { files: shellFiles, cwd: currentShellCwd });
+            
             if (!isExecutionRunning) updateOutputStatus('hidden');
           }
-        } else if (type === 'stdout') {
-          appendConsoleLine('normal', text);
-        } else if (type === 'stderr') {
-          appendConsoleLine('error', text);
-        } else if (type === 'done') {
+        } else if (e.data.type === 'stdout') {
+          appendConsoleLine('normal', e.data.text);
+        } else if (e.data.type === 'stderr') {
+          appendConsoleLine('error', e.data.text);
+        } else if (e.data.type === 'done') {
           setRunningUIState(false);
           updateOutputStatus('completed', '✔');
-        } else if (type === 'error') {
+          startShellMode();
+        } else if (e.data.type === 'error') {
           setRunningUIState(false);
           updateOutputStatus('error', '❌ Error');
-          appendConsoleLine('error', `Python Traceback:\n${error}`);
+          appendConsoleLine('error', `Python Traceback:\n${e.data.error}`);
+          startShellMode();
+        } else if (e.data.type === 'shell_done') {
+          if (e.data.files) {
+            shellFiles = e.data.files;
+            try { localStorage.setItem('livecode_files', JSON.stringify(shellFiles)); } catch(e){}
+          }
+          if (e.data.cwd) currentShellCwd = e.data.cwd;
+          renderFilesList();
+          socket.emit('file-system-sync', { files: shellFiles, cwd: currentShellCwd });
+          if (!e.data.skipPrompt) {
+            startShellMode();
+          }
+        } else if (e.data.type === 'shell_clear') {
+          if (terminal) terminal.reset();
+          startShellMode();
+        } else if (e.data.type === 'open_file') {
+          currentActiveFile = e.data.filename;
+          if (!fileSavedContents.has(e.data.filename)) {
+            fileSavedContents.set(e.data.filename, e.data.content);
+          }
+          const draft = tabBufferMap.has(e.data.filename) ? tabBufferMap.get(e.data.filename) : e.data.content;
+          codeTextarea.value = draft;
+          roomCode = draft;
+          tabBufferMap.set(e.data.filename, draft);
+          if (draft === fileSavedContents.get(e.data.filename)) {
+            unsavedFiles.delete(e.data.filename);
+          } else {
+            unsavedFiles.add(e.data.filename);
+          }
+          if (!openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
+          updateEditorDisplay();
+          renderFilesList();
+          renderTabs();
+          socket.emit('code-update', { code: roomCode, senderId: socket.id, cursor: null, activeFile: currentActiveFile });
         }
       };
 
       activeExecutionWorker.onerror = (err) => {
         setRunningUIState(false);
         updateOutputStatus('error', '❌ Error');
-        appendConsoleLine('error', `Worker Error: ${err.message}`);
+        const msg = (err && err.message) ? err.message : 'Execution error';
+        appendConsoleLine('error', `Worker Error: ${msg}`);
       };
 
-      // Pre-warm Python runtime
-      activeExecutionWorker.postMessage({ type: 'init' });
+      // Initialize engine in background
+      activeExecutionWorker.postMessage({ type: 'init', roomId: currentRoomId, origin: window.location.origin, currentCode: codeTextarea.value, activeFile: currentActiveFile, files: shellFiles });
     }
     return activeExecutionWorker;
   }
@@ -1063,6 +1637,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Pre-warm fresh worker for next run
     getOrInitWorker();
+    startShellMode();
   }
 
   function runPythonCode(codeToRun) {
@@ -1074,7 +1649,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     outputDrawer.classList.remove('collapsed');
-    consoleOutput.innerHTML = '';
+    if (terminal) {
+      terminal.reset();
+    } else {
+      consoleOutput.innerHTML = '';
+    }
+    isShellMode = false;
     htmlPreviewContainer.classList.add('hidden');
     consoleOutput.classList.remove('hidden');
 
@@ -1084,7 +1664,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const worker = getOrInitWorker();
     if (worker) {
-      worker.postMessage({ type: 'run', code: codeToRun });
+      worker.postMessage({ type: 'run', code: codeToRun, activeFile: currentActiveFile, roomId: currentRoomId, origin: window.location.origin });
     }
   }
 
@@ -1105,40 +1685,1069 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  let terminal = null;
+  let fitAddon = null;
+  let isTerminalExpectingInput = false;
+  let currentTerminalInputBuffer = '';
+  let isShellMode = false;
+  let shellHistory = [];
+  let shellHistoryIndex = -1;
+  let shellFiles = [];
+  try {
+    const savedFiles = localStorage.getItem('livecode_files');
+    if (savedFiles) {
+      const parsed = JSON.parse(savedFiles);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        shellFiles = parsed;
+      }
+    }
+  } catch(e){}
+
+  let currentShellCwd = '/home/pyodide';
+  const shellCommands = ['ls', 'cd', 'cat', 'open', 'pwd', 'clear', 'mkdir', 'rmdir', 'touch', 'rm', 'cp', 'mv', 'echo'];
+
+  const createFileBtn = document.getElementById('createFileBtn');
+  const createFolderBtn = document.getElementById('createFolderBtn');
+  const collapseFoldersBtn = document.getElementById('collapseFoldersBtn');
+  const refreshFilesBtn = document.getElementById('refreshFilesBtn');
+
+  if (collapseFoldersBtn) {
+    collapseFoldersBtn.addEventListener('click', () => {
+      if (shellFiles) {
+        shellFiles.forEach(f => {
+          if (f.endsWith('/')) {
+            collapsedFolders.add(f);
+          } else if (f.includes('/')) {
+            const parts = f.split('/');
+            parts.pop();
+            let current = '';
+            parts.forEach(p => {
+              current = current ? current + '/' + p : p;
+              collapsedFolders.add(current + '/');
+            });
+          }
+        });
+      }
+      renderFilesList();
+    });
+  }
+
+  if (refreshFilesBtn) {
+    refreshFilesBtn.addEventListener('click', () => {
+      refreshFilesTree();
+    });
+  }
+
+  function refreshFilesTree() {
+    if (isHost) {
+      const worker = getOrInitWorker();
+      if (worker) {
+        worker.postMessage({ type: 'shell', command: 'ls', currentCode: codeTextarea.value, activeFile: currentActiveFile, skipPrompt: true });
+      }
+    } else {
+      socket.emit('request-shell-command', { command: 'ls', currentCode: codeTextarea.value, activeFile: currentActiveFile, skipPrompt: true });
+    }
+  }
+
+  if (createFileBtn) {
+    createFileBtn.addEventListener('click', () => {
+      if (selectedFolder && collapsedFolders.has(selectedFolder)) {
+        collapsedFolders.delete(selectedFolder);
+      }
+      inlineCreatingItem = { type: 'file', parentFolder: selectedFolder };
+      renderFilesList();
+    });
+  }
+
+  if (createFolderBtn) {
+    createFolderBtn.addEventListener('click', () => {
+      if (selectedFolder && collapsedFolders.has(selectedFolder)) {
+        collapsedFolders.delete(selectedFolder);
+      }
+      inlineCreatingItem = { type: 'folder', parentFolder: selectedFolder };
+      renderFilesList();
+    });
+  }
+
+  function openFileInTab(filename) {
+    if (!openTabs.includes(filename)) {
+      openTabs.push(filename);
+    }
+    renderTabs();
+    if (filename !== currentActiveFile) {
+      if (isHost) {
+        const worker = getOrInitWorker();
+        if (worker) worker.postMessage({ type: 'shell', command: 'open ' + filename, activeFile: currentActiveFile, skipPrompt: true });
+      } else {
+        socket.emit('request-shell-command', { command: 'open ' + filename, activeFile: currentActiveFile, skipPrompt: true });
+      }
+    } else {
+      renderFilesList();
+    }
+  }
+
+  function renderTabs() {
+    const tabsContainer = document.getElementById('editorTabs');
+    if (!tabsContainer) return;
+    tabsContainer.innerHTML = '';
+    
+    openTabs.forEach(tabName => {
+      const tabEl = document.createElement('div');
+      const isUnsaved = unsavedFiles.has(tabName);
+      tabEl.className = `editor-tab ${tabName === currentActiveFile ? 'active' : ''} ${isUnsaved ? 'unsaved' : ''}`;
+      tabEl.innerHTML = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink: 0;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
+        <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;" title="${tabName}">${tabName}</span>
+        ${isUnsaved ? '<span class="unsaved-dot" title="Unsaved changes" style="flex-shrink: 0;">•</span>' : ''}
+        <div class="editor-tab-close" title="Close Tab" style="flex-shrink: 0;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </div>
+      `;
+      
+      tabEl.addEventListener('click', (e) => {
+        if (e.target.closest('.editor-tab-close')) return;
+        if (tabName !== currentActiveFile) {
+          openFileInTab(tabName);
+        }
+      });
+      
+      const closeBtn = tabEl.querySelector('.editor-tab-close');
+      closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openTabs = openTabs.filter(t => t !== tabName);
+        if (openTabs.length === 0) {
+          currentActiveFile = '';
+          if (codeTextarea) codeTextarea.value = '';
+          roomCode = '';
+          updateEditorDisplay();
+          renderTabs();
+          renderFilesList();
+          socket.emit('code-update', { code: roomCode, senderId: socket.id, cursor: null, activeFile: '' });
+          return;
+        }
+        
+        if (tabName === currentActiveFile) {
+          const nextTab = openTabs[openTabs.length - 1];
+          openFileInTab(nextTab);
+        } else {
+          renderTabs();
+        }
+      });
+      
+      tabsContainer.appendChild(tabEl);
+    });
+  }
+
+  let selectedFolder = '';
+  const collapsedFolders = new Set();
+  let inlineCreatingItem = null;
+
+  function commitInlineCreate(name) {
+    if (!inlineCreatingItem) return;
+    const cleanName = name ? name.trim() : '';
+    const type = inlineCreatingItem.type;
+    const parentFolder = inlineCreatingItem.parentFolder;
+    inlineCreatingItem = null;
+
+    if (!cleanName) {
+      renderFilesList();
+      return;
+    }
+
+    let fullPath = cleanName;
+    const normalizedParent = (parentFolder && parentFolder !== '/') ? parentFolder : '';
+    if (normalizedParent) {
+      const prefix = normalizedParent.endsWith('/') ? normalizedParent : normalizedParent + '/';
+      fullPath = prefix + cleanName;
+    }
+
+    if (type === 'folder') {
+      const folderPath = fullPath.endsWith('/') ? fullPath : fullPath + '/';
+      const cleanFolderPath = folderPath.endsWith('/') ? folderPath.slice(0, -1) : folderPath;
+      const cmd = `mkdir "${cleanFolderPath}"`;
+      sendShellCommand(cmd);
+
+      if (!shellFiles.includes(folderPath)) {
+        shellFiles.push(folderPath);
+      }
+      selectedFolder = folderPath;
+      renderFilesList();
+    } else {
+      const cmd = `touch "${fullPath}"`;
+      sendShellCommand(cmd);
+
+      if (!shellFiles.includes(fullPath)) {
+        shellFiles.push(fullPath);
+      }
+      currentActiveFile = fullPath;
+      if (codeTextarea) codeTextarea.value = '';
+      roomCode = '';
+      if (!openTabs.includes(fullPath)) {
+        openTabs.push(fullPath);
+      }
+      updateEditorDisplay();
+      renderTabs();
+      renderFilesList();
+      socket.emit('code-update', { code: roomCode, senderId: socket.id, cursor: null, activeFile: currentActiveFile });
+      if (codeTextarea) {
+        setTimeout(() => {
+          codeTextarea.focus();
+          codeTextarea.setSelectionRange(0, 0);
+        }, 50);
+      }
+    }
+  }
+
+  function sendShellCommand(cmd) {
+    if (terminal) {
+      let displayCwd = currentShellCwd.startsWith('/home/pyodide') 
+        ? currentShellCwd.replace('/home/pyodide', '~') 
+        : currentShellCwd;
+      if (displayCwd === '') displayCwd = '~';
+      terminal.write(`\r\x1b[2K\x1b[1;34m${displayCwd}\x1b[32m$ \x1b[0m${cmd}\r\n`);
+    }
+    if (isHost) {
+      const worker = getOrInitWorker();
+      if (worker) worker.postMessage({ type: 'shell', command: cmd, currentCode: codeTextarea.value, activeFile: currentActiveFile, skipPrompt: false });
+    } else {
+      socket.emit('request-shell-command', { command: cmd, currentCode: codeTextarea.value, activeFile: currentActiveFile, skipPrompt: false });
+    }
+  }
+
+  let renamingPath = null;
+
+  function commitInlineRename(child, newName) {
+    const cleanNewName = newName.trim();
+    renamingPath = null;
+
+    if (!cleanNewName || cleanNewName === child.name) {
+      renderFilesList();
+      return;
+    }
+
+    const isFolder = child.isFolder;
+    const cleanOldPath = isFolder && child.path.endsWith('/') ? child.path.slice(0, -1) : child.path;
+    const pathParts = cleanOldPath.split('/');
+    pathParts.pop();
+    const parentDir = pathParts.join('/');
+
+    let newPath = parentDir ? `${parentDir}/${cleanNewName}` : cleanNewName;
+    if (isFolder) newPath += '/';
+
+    const cleanNewPath = isFolder ? newPath.slice(0, -1) : newPath;
+    const cmd = `mv "${cleanOldPath}" "${cleanNewPath}"`;
+    sendShellCommand(cmd);
+
+    if (!isFolder) {
+      if (unsavedFiles.has(child.path) || unsavedFiles.has(cleanOldPath)) {
+        unsavedFiles.delete(child.path);
+        unsavedFiles.delete(cleanOldPath);
+        unsavedFiles.add(cleanNewPath);
+      }
+      if (fileSavedContents.has(child.path) || fileSavedContents.has(cleanOldPath)) {
+        const val = fileSavedContents.get(child.path) || fileSavedContents.get(cleanOldPath);
+        fileSavedContents.delete(child.path);
+        fileSavedContents.delete(cleanOldPath);
+        fileSavedContents.set(cleanNewPath, val);
+      }
+      if (tabBufferMap.has(child.path) || tabBufferMap.has(cleanOldPath)) {
+        const buf = tabBufferMap.get(child.path) || tabBufferMap.get(cleanOldPath);
+        tabBufferMap.delete(child.path);
+        tabBufferMap.delete(cleanOldPath);
+        tabBufferMap.set(cleanNewPath, buf);
+      }
+
+      const openIdx = openTabs.findIndex(t => t === child.path || t === cleanOldPath);
+      if (openIdx !== -1) openTabs[openIdx] = cleanNewPath;
+
+      if (currentActiveFile === child.path || currentActiveFile === cleanOldPath) {
+        currentActiveFile = cleanNewPath;
+      }
+      renderTabs();
+    }
+
+    renderFilesList();
+  }
+
+  function deleteTreeItem(targetPath, isFolder) {
+    const cleanPath = isFolder && targetPath.endsWith('/') ? targetPath.slice(0, -1) : targetPath;
+    const pathParts = cleanPath.split('/');
+    const itemName = pathParts[pathParts.length - 1];
+
+    if (!confirm(`Are you sure you want to delete ${isFolder ? 'folder' : 'file'} "${itemName}"?`)) return;
+
+    const cmd = isFolder ? `rm -r "${cleanPath}"` : `rm "${cleanPath}"`;
+    sendShellCommand(cmd);
+
+    if (!isFolder) {
+      openTabs = openTabs.filter(t => t !== targetPath && t !== cleanPath);
+      if (openTabs.length === 0) {
+        currentActiveFile = '';
+        if (codeTextarea) codeTextarea.value = '';
+        roomCode = '';
+        updateEditorDisplay();
+      } else if (currentActiveFile === targetPath || currentActiveFile === cleanPath) {
+        currentActiveFile = openTabs[openTabs.length - 1];
+        openFileInTab(currentActiveFile);
+      }
+      renderTabs();
+    }
+  }
+
+  function saveActiveFile() {
+    let filename = currentActiveFile;
+
+    if (!filename || filename === 'Untitled' || filename === 'Untitled.py' || filename.startsWith('Untitled')) {
+      const input = prompt('Save file as:', 'untitled.py');
+      if (!input || !input.trim()) return;
+      filename = input.trim();
+    }
+
+    const content = codeTextarea ? codeTextarea.value : roomCode;
+
+    if (isHost) {
+      const worker = getOrInitWorker();
+      if (worker) {
+        worker.postMessage({
+          type: 'shell',
+          command: 'touch ' + filename,
+          currentCode: content,
+          activeFile: filename,
+          skipPrompt: true
+        });
+      }
+    } else {
+      socket.emit('request-shell-command', {
+        command: 'touch ' + filename,
+        currentCode: content,
+        activeFile: filename,
+        skipPrompt: true
+      });
+    }
+
+    const oldFile = currentActiveFile;
+    currentActiveFile = filename;
+
+    const tabIdx = openTabs.indexOf(oldFile);
+    if (tabIdx !== -1) {
+      openTabs[tabIdx] = filename;
+    } else if (!openTabs.includes(filename)) {
+      openTabs.push(filename);
+    }
+
+    if (!shellFiles.includes(filename)) {
+      shellFiles.push(filename);
+      try { localStorage.setItem('livecode_files', JSON.stringify(shellFiles)); } catch(e){}
+    }
+
+    if (oldFile && oldFile !== filename) {
+      unsavedFiles.delete(oldFile);
+      fileSavedContents.delete(oldFile);
+      tabBufferMap.delete(oldFile);
+    }
+    unsavedFiles.delete(filename);
+    fileSavedContents.set(filename, content);
+    tabBufferMap.set(filename, content);
+
+    renderTabs();
+    renderFilesList();
+    showToast(`Saved ${filename}`, 'success');
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      saveActiveFile();
+    }
+  }, true);
+
+  function handleTreeDrop(sourcePath, targetNode) {
+    const fileListContainer = document.getElementById('fileListContainer');
+    if (fileListContainer) {
+      fileListContainer.classList.remove('root-drag-over');
+    }
+    if (!sourcePath) return;
+    const isSourceFolder = sourcePath.endsWith('/');
+    const cleanSource = isSourceFolder ? sourcePath.slice(0, -1) : sourcePath;
+    const sourceName = cleanSource.split('/').pop();
+
+    let targetDir = '';
+    if (targetNode && targetNode.isFolder) {
+      targetDir = targetNode.path.endsWith('/') ? targetNode.path.slice(0, -1) : targetNode.path;
+    } else if (targetNode && !targetNode.isFolder) {
+      const cleanTarget = targetNode.path;
+      const targetParts = cleanTarget.split('/');
+      targetParts.pop();
+      targetDir = targetParts.join('/');
+    } else {
+      targetDir = '';
+    }
+
+    if (isSourceFolder && targetDir && targetDir.startsWith(cleanSource)) {
+      showToast('⚠️ Cannot move a folder into itself!', 'warning');
+      return;
+    }
+
+    const newPath = targetDir ? `${targetDir}/${sourceName}${isSourceFolder ? '/' : ''}` : `${sourceName}${isSourceFolder ? '/' : ''}`;
+    const cleanNewPath = isSourceFolder && newPath.endsWith('/') ? newPath.slice(0, -1) : newPath;
+
+    if (cleanNewPath === cleanSource) return;
+
+    const cmd = `mv "${cleanSource}" "${cleanNewPath}"`;
+    sendShellCommand(cmd);
+
+    if (!isSourceFolder) {
+      if (unsavedFiles.has(sourcePath) || unsavedFiles.has(cleanSource)) {
+        unsavedFiles.delete(sourcePath);
+        unsavedFiles.delete(cleanSource);
+        unsavedFiles.add(cleanNewPath);
+      }
+      if (fileSavedContents.has(sourcePath) || fileSavedContents.has(cleanSource)) {
+        const val = fileSavedContents.get(sourcePath) || fileSavedContents.get(cleanSource);
+        fileSavedContents.delete(sourcePath);
+        fileSavedContents.delete(cleanSource);
+        fileSavedContents.set(cleanNewPath, val);
+      }
+      if (tabBufferMap.has(sourcePath) || tabBufferMap.has(cleanSource)) {
+        const buf = tabBufferMap.get(sourcePath) || tabBufferMap.get(cleanSource);
+        tabBufferMap.delete(sourcePath);
+        tabBufferMap.delete(cleanSource);
+        tabBufferMap.set(cleanNewPath, buf);
+      }
+
+      const openIdx = openTabs.findIndex(t => t === sourcePath || t === cleanSource);
+      if (openIdx !== -1) openTabs[openIdx] = cleanNewPath;
+
+      if (currentActiveFile === sourcePath || currentActiveFile === cleanSource) {
+        currentActiveFile = cleanNewPath;
+      }
+      renderTabs();
+    }
+  }
+
+  function buildFileTree(files) {
+    const root = { name: '', isFolder: true, path: '', children: [] };
+    const nodeMap = { '': root };
+
+    const sorted = [...files].sort();
+
+    sorted.forEach(filePath => {
+      const isFolder = filePath.endsWith('/');
+      const cleanPath = isFolder ? filePath.slice(0, -1) : filePath;
+      const parts = cleanPath.split('/');
+
+      let currentPath = '';
+      let parentNode = root;
+
+      parts.forEach((part, idx) => {
+        const isLast = idx === parts.length - 1;
+        const itemIsFolder = isLast ? isFolder : true;
+        currentPath = currentPath ? `${currentPath}/${part}` : part;
+        const key = itemIsFolder ? `${currentPath}/` : currentPath;
+
+        if (!nodeMap[key]) {
+          const newNode = {
+            name: part,
+            isFolder: itemIsFolder,
+            path: key,
+            children: []
+          };
+          nodeMap[key] = newNode;
+          parentNode.children.push(newNode);
+        }
+        parentNode = nodeMap[key];
+      });
+    });
+
+    return root;
+  }
+
+  function renderTreeNodes(node, container, depth = 0) {
+    const normalizedTargetParent = (inlineCreatingItem && inlineCreatingItem.parentFolder !== '/') ? (inlineCreatingItem.parentFolder || '') : '';
+    if (inlineCreatingItem && normalizedTargetParent === node.path) {
+      const inlineEl = document.createElement('div');
+      inlineEl.className = 'user-item inline-create-item';
+      inlineEl.style.marginBottom = '2px';
+      inlineEl.style.display = 'flex';
+      inlineEl.style.alignItems = 'center';
+      inlineEl.style.padding = '4px 8px';
+      inlineEl.style.paddingLeft = `${depth * 14 + 8}px`;
+      inlineEl.style.borderRadius = '4px';
+
+      const isFolder = inlineCreatingItem.type === 'folder';
+      const iconHtml = isFolder
+        ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #a78bfa;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`
+        : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #94a3b8;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`;
+
+      const placeholder = isFolder ? 'Folder name...' : 'File name...';
+
+      inlineEl.innerHTML = `
+        <span style="display:inline-block; width: 12px; margin-right: 4px;"></span>
+        <div style="margin-right: 6px; display: flex; align-items: center;">${iconHtml}</div>
+        <input type="text" class="inline-create-input" placeholder="${placeholder}" style="font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-card, #1e293b); color: var(--text-primary); border: 1px solid var(--accent-primary, #6366f1); border-radius: 3px; padding: 1px 4px; width: calc(100% - 20px); outline: none;" />
+      `;
+
+      container.appendChild(inlineEl);
+
+      const inputEl = inlineEl.querySelector('.inline-create-input');
+      if (inputEl) {
+        setTimeout(() => {
+          inputEl.focus();
+        }, 0);
+
+        inputEl.addEventListener('click', (e) => e.stopPropagation());
+        inputEl.addEventListener('keydown', (e) => {
+          e.stopPropagation();
+          if (e.key === 'Enter') {
+            commitInlineCreate(inputEl.value);
+          } else if (e.key === 'Escape') {
+            inlineCreatingItem = null;
+            renderFilesList();
+          }
+        });
+
+        inputEl.addEventListener('blur', () => {
+          commitInlineCreate(inputEl.value);
+        });
+      }
+    }
+
+    const sortedChildren = [...node.children].sort((a, b) => {
+      if (a.isFolder && !b.isFolder) return -1;
+      if (!a.isFolder && b.isFolder) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+      sortedChildren.forEach(child => {
+        const isRenaming = renamingPath === child.path;
+        const el = document.createElement('div');
+        el.className = 'user-item';
+        el.draggable = !isRenaming;
+        el.style.cursor = isRenaming ? 'default' : 'pointer';
+        el.style.marginBottom = '2px';
+        el.style.display = 'flex';
+        el.style.alignItems = 'center';
+        el.style.padding = '4px 8px';
+        el.style.paddingLeft = `${depth * 14 + 8}px`;
+        el.style.borderRadius = '4px';
+        el.style.userSelect = isRenaming ? 'text' : 'none';
+
+      const isSelectedFolder = child.isFolder && selectedFolder === child.path;
+      const isActiveFile = !child.isFolder && !selectedFolder && (child.path === currentActiveFile || child.name === currentActiveFile);
+
+      if (isSelectedFolder || isActiveFile) {
+        el.style.backgroundColor = 'var(--bg-active, rgba(255,255,255,0.15))';
+        el.style.borderLeft = '2px solid var(--accent-primary)';
+      }
+
+      const isCollapsed = collapsedFolders.has(child.path);
+
+      let chevronHtml = '';
+      if (child.isFolder) {
+        const arrow = isCollapsed ? '▸' : '▾';
+        chevronHtml = `<span style="display:inline-block; width: 12px; margin-right: 4px; font-size: 0.75rem; color: var(--text-muted);">${arrow}</span>`;
+      } else {
+        chevronHtml = `<span style="display:inline-block; width: 12px; margin-right: 4px;"></span>`;
+      }
+
+      const iconHtml = child.isFolder
+        ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #a78bfa;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`
+        : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #94a3b8;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`;
+
+      let nameContentHtml = '';
+      const isItemUnsaved = !child.isFolder && unsavedFiles.has(child.path);
+      const unsavedDotHtml = isItemUnsaved ? '<span class="unsaved-dot" title="Unsaved changes" style="margin-left: 4px; color: var(--accent-amber, #f59e0b); font-size: 1.1rem; line-height: 1;">•</span>' : '';
+      if (isRenaming) {
+        nameContentHtml = `<input type="text" class="inline-rename-input" value="${child.name}" style="font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-card, #1e293b); color: var(--text-primary); border: 1px solid var(--accent-primary, #6366f1); border-radius: 3px; padding: 1px 4px; width: calc(100% - 20px); outline: none; user-select: text !important; -webkit-user-select: text !important; cursor: text;" />`;
+      } else {
+        nameContentHtml = `<div class="tree-node-name" style="font-family: var(--font-mono); font-size: 0.85rem; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: ${child.isFolder ? 'var(--text-primary)' : 'var(--text-muted)'}; display: flex; align-items: center;"><span>${child.name}</span>${unsavedDotHtml}</div>`;
+      }
+
+      el.innerHTML = `
+        ${chevronHtml}
+        <div style="margin-right: 6px; display: flex; align-items: center;">
+          ${iconHtml}
+        </div>
+        ${nameContentHtml}
+        <div class="tree-item-actions" style="display: ${isRenaming ? 'none' : 'none'}; gap: 4px; align-items: center; margin-left: 4px;">
+          <button class="tree-action-btn rename-btn" title="Rename">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+          </button>
+          <button class="tree-action-btn delete-btn" title="Delete">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+          </button>
+        </div>
+      `;
+
+      if (isRenaming) {
+        const inputEl = el.querySelector('.inline-rename-input');
+        if (inputEl) {
+          inputEl.setAttribute('draggable', 'false');
+          setTimeout(() => {
+            inputEl.focus();
+          }, 0);
+
+          inputEl.addEventListener('click', (e) => e.stopPropagation());
+          inputEl.addEventListener('mousedown', (e) => e.stopPropagation());
+          inputEl.addEventListener('mouseup', (e) => e.stopPropagation());
+          inputEl.addEventListener('dblclick', (e) => e.stopPropagation());
+
+          inputEl.addEventListener('keydown', (e) => {
+            e.stopPropagation();
+            if (e.key === 'Enter') {
+              commitInlineRename(child, inputEl.value);
+            } else if (e.key === 'Escape') {
+              renamingPath = null;
+              renderFilesList();
+            }
+          });
+
+          inputEl.addEventListener('blur', () => {
+            commitInlineRename(child, inputEl.value);
+          });
+        }
+      }
+
+      // Drag and drop event listeners
+      el.addEventListener('dragstart', (e) => {
+        if (isRenaming || e.target.closest('.inline-rename-input')) {
+          e.preventDefault();
+          return;
+        }
+        e.stopPropagation();
+        e.dataTransfer.setData('text/plain', child.path);
+
+        const dragGhost = document.createElement('div');
+        dragGhost.style.position = 'absolute';
+        dragGhost.style.top = '-9999px';
+        dragGhost.style.left = '-9999px';
+        dragGhost.style.padding = '3px 8px';
+        dragGhost.style.background = '#1e293b';
+        dragGhost.style.color = '#f8fafc';
+        dragGhost.style.fontSize = '0.78rem';
+        dragGhost.style.fontFamily = 'monospace';
+        dragGhost.style.borderRadius = '4px';
+        dragGhost.style.border = '1px solid #6366f1';
+        dragGhost.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.4)';
+        dragGhost.style.pointerEvents = 'none';
+        dragGhost.style.zIndex = '99999';
+        dragGhost.innerText = `${child.isFolder ? '📁' : '📄'} ${child.name}`;
+        document.body.appendChild(dragGhost);
+
+        if (e.dataTransfer.setDragImage) {
+          e.dataTransfer.setDragImage(dragGhost, 10, 10);
+        }
+
+        setTimeout(() => {
+          if (dragGhost.parentNode) {
+            dragGhost.parentNode.removeChild(dragGhost);
+          }
+        }, 0);
+      });
+
+      el.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const fileListContainer = document.getElementById('fileListContainer');
+        if (child.isFolder) {
+          if (fileListContainer) fileListContainer.classList.remove('root-drag-over');
+          el.classList.add('drag-folder-over');
+        } else if (fileListContainer) {
+          fileListContainer.classList.add('root-drag-over');
+        }
+      });
+
+      el.addEventListener('dragleave', (e) => {
+        e.stopPropagation();
+        el.classList.remove('drag-folder-over');
+      });
+
+      el.addEventListener('drop', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        el.classList.remove('drag-folder-over');
+        const sourcePath = e.dataTransfer.getData('text/plain');
+        handleTreeDrop(sourcePath, child);
+      });
+
+      // Item click event listener
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (child.isFolder) {
+          selectedFolder = child.path;
+          if (collapsedFolders.has(child.path)) {
+            collapsedFolders.delete(child.path);
+          } else {
+            collapsedFolders.add(child.path);
+          }
+          renderFilesList();
+        } else {
+          selectedFolder = '';
+          openFileInTab(child.path);
+          renderFilesList();
+        }
+      });
+
+      // Action button click listeners
+      const renameBtn = el.querySelector('.rename-btn');
+      const deleteBtn = el.querySelector('.delete-btn');
+      const nameEl = el.querySelector('.tree-node-name');
+
+      if (nameEl) {
+        nameEl.addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          renamingPath = child.path;
+          renderFilesList();
+        });
+      }
+
+      if (renameBtn) {
+        renameBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          renamingPath = child.path;
+          renderFilesList();
+        });
+      }
+
+      if (deleteBtn) {
+        deleteBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deleteTreeItem(child.path, child.isFolder);
+        });
+      }
+
+      container.appendChild(el);
+
+      const shouldRenderSubtree = child.isFolder && !isCollapsed && (child.children.length > 0 || (inlineCreatingItem && inlineCreatingItem.parentFolder === child.path));
+      if (shouldRenderSubtree) {
+        renderTreeNodes(child, container, depth + 1);
+      }
+    });
+  }
+
+  let isContainerDragInit = false;
+
+  function renderFilesList() {
+    const fileListContainer = document.getElementById('fileListContainer');
+    if (!fileListContainer) return;
+    fileListContainer.innerHTML = '';
+
+    if (!isContainerDragInit) {
+      isContainerDragInit = true;
+      fileListContainer.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        fileListContainer.classList.add('root-drag-over');
+      });
+      fileListContainer.addEventListener('dragleave', (e) => {
+        if (e.target === fileListContainer) {
+          fileListContainer.classList.remove('root-drag-over');
+        }
+      });
+      fileListContainer.addEventListener('drop', (e) => {
+        e.preventDefault();
+        fileListContainer.classList.remove('root-drag-over');
+        const sourcePath = e.dataTransfer.getData('text/plain');
+        if (sourcePath) {
+          handleTreeDrop(sourcePath, null);
+        }
+      });
+      const sidebarContent = document.querySelector('.sidebar-content');
+      const handleEmptyTreeClick = (e) => {
+        if (!e.target.closest('.user-item') && !e.target.closest('#createFileBtn') && !e.target.closest('#createFolderBtn')) {
+          if (selectedFolder) {
+            selectedFolder = '';
+            renderFilesList();
+          }
+        }
+      };
+
+      fileListContainer.addEventListener('click', handleEmptyTreeClick);
+      if (sidebarContent) sidebarContent.addEventListener('click', handleEmptyTreeClick);
+
+      window.addEventListener('click', (e) => {
+        if (!e.target.closest('#sidebar') && !e.target.closest('#createFileBtn') && !e.target.closest('#createFolderBtn')) {
+          if (selectedFolder) {
+            selectedFolder = '';
+            renderFilesList();
+          }
+        }
+      });
+    }
+
+    if ((!shellFiles || shellFiles.length === 0) && !inlineCreatingItem) {
+      fileListContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 4px;">No files</div>';
+      return;
+    }
+
+    const tree = buildFileTree(shellFiles || []);
+    renderTreeNodes(tree, fileListContainer, 0);
+  }
+
+  function renderShellInput(buffer) {
+    if (!buffer) return '';
+    const matchArgs = (str) => {
+      const regex = /(?:[^\s"']+|"[^"]*"|'[^']*')+/g;
+      const matches = str.match(regex) || [];
+      return matches.map(m => {
+        if ((m.startsWith('"') && m.endsWith('"')) || (m.startsWith("'") && m.endsWith("'"))) {
+          return m.slice(1, -1);
+        }
+        return m;
+      });
+    };
+    const parts = matchArgs(buffer);
+    const command = parts[0] ? parts[0].trim() : '';
+    let result = '';
+    
+    if (command) {
+      if (shellCommands.includes(command)) {
+        result += '\x1b[32m' + command + '\x1b[0m'; // Green
+      } else {
+        result += '\x1b[31m' + command + '\x1b[0m'; // Red
+      }
+    }
+    
+    const spaceIndex = buffer.indexOf(' ');
+    if (spaceIndex !== -1) {
+      result += '\x1b[37m' + buffer.substring(spaceIndex) + '\x1b[0m'; // White
+    }
+    
+    return result;
+  }
+
+  function redrawShellLine() {
+    if (!terminal) return;
+    let displayCwd = currentShellCwd.startsWith('/home/pyodide') 
+      ? currentShellCwd.replace('/home/pyodide', '~') 
+      : currentShellCwd;
+    if (displayCwd === '') displayCwd = '~';
+    const promptFormatted = `\x1b[1;34m${displayCwd}\x1b[32m$ \x1b[0m`;
+    terminal.write(`\r\x1b[2K${promptFormatted}${renderShellInput(currentTerminalInputBuffer)}`);
+  }
+
+  function startShellMode() {
+    isShellMode = true;
+    isTerminalExpectingInput = true;
+    currentTerminalInputBuffer = '';
+    
+    // Replace /home/pyodide with ~ for aesthetic
+    let displayCwd = currentShellCwd.startsWith('/home/pyodide') 
+      ? currentShellCwd.replace('/home/pyodide', '~') 
+      : currentShellCwd;
+    if (displayCwd === '') displayCwd = '~';
+
+    const promptFormatted = `\x1b[1;34m${displayCwd}\x1b[32m$ \x1b[0m`;
+    
+    if (!terminal) initTerminal();
+    terminal.write(promptFormatted);
+    
+    socket.emit('output-sync', { action: 'shell_prompt', text: `${displayCwd}$ ` });
+    showConsoleInput();
+  }
+
+  function initTerminal() {
+    if (terminal) return;
+    consoleOutput.innerHTML = ''; // Clear default HTML
+    terminal = new Terminal({
+      cursorBlink: true,
+      theme: {
+        background: '#12151e',
+        foreground: '#f8fafc',
+        cursor: '#a78bfa'
+      },
+      fontFamily: "'Fira Code', 'Consolas', monospace",
+      fontSize: 14,
+      convertEol: true
+    });
+    fitAddon = new FitAddon.FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.open(consoleOutput);
+    
+    // Slight delay to ensure DOM is fully rendered before fitting
+    setTimeout(() => { if (fitAddon) fitAddon.fit(); }, 10);
+    
+    window.addEventListener('resize', () => {
+      if (fitAddon) fitAddon.fit();
+    });
+
+    terminal.onData((data) => {
+      if (!isTerminalExpectingInput) return;
+      
+      if (data === '\r') {
+        const rawText = currentTerminalInputBuffer;
+        const text = rawText.replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim();
+        isTerminalExpectingInput = false;
+        currentTerminalInputBuffer = '';
+        
+        terminal.write('\r\n');
+        
+        if (isShellMode) {
+          isShellMode = false;
+          if (text) {
+            shellHistory.push(text);
+            shellHistoryIndex = -1;
+          }
+          socket.emit('output-sync', { action: 'input_resolved', text: text });
+          if (isHost) {
+            const worker = getOrInitWorker();
+            if (worker) {
+              worker.postMessage({ type: 'shell', command: text, currentCode: codeTextarea.value, activeFile: currentActiveFile });
+            }
+          } else {
+            socket.emit('request-shell-command', { command: text, currentCode: codeTextarea.value, activeFile: currentActiveFile });
+          }
+        } else {
+          // Broadcast that input is resolved
+          socket.emit('output-sync', { action: 'input_resolved', text: text });
+          socket.emit('provide-input', { text: text + '\n' });
+        }
+      } else if (data === '\u007F') { // Backspace
+        if (currentTerminalInputBuffer.length > 0) {
+          if (isShellMode) {
+            currentTerminalInputBuffer = currentTerminalInputBuffer.slice(0, -1);
+            redrawShellLine();
+          } else {
+            currentTerminalInputBuffer = currentTerminalInputBuffer.slice(0, -1);
+            terminal.write('\b \b');
+          }
+        }
+      } else if (data === '\t') { // Tab auto-completion
+        if (isShellMode) {
+          const buffer = currentTerminalInputBuffer;
+          const matchArgs = (str) => {
+            const regex = /(?:[^\s"']+|"[^"]*"|'[^']*')+/g;
+            return str.match(regex) || [];
+          };
+          const rawParts = matchArgs(buffer);
+          
+          if (rawParts.length === 0 || (!buffer.endsWith(' ') && rawParts.length === 1)) {
+            const prefix = rawParts[0] || '';
+            const match = shellCommands.find(c => c.startsWith(prefix));
+            if (match && match !== prefix) {
+              currentTerminalInputBuffer = match + ' ';
+              redrawShellLine();
+            }
+          } else {
+            const endsWithSpace = buffer.endsWith(' ');
+            const lastPart = endsWithSpace ? '' : rawParts[rawParts.length - 1].replace(/^["']|["']$/g, '');
+            const candidates = (shellFiles || []).map(f => f.endsWith('/') ? f.slice(0, -1) : f);
+            const match = candidates.find(f => f.startsWith(lastPart));
+            if (match && match !== lastPart) {
+              if (endsWithSpace) {
+                currentTerminalInputBuffer = buffer + (match.includes(' ') ? `"${match}"` : match);
+              } else {
+                const prefixBuffer = buffer.slice(0, buffer.lastIndexOf(rawParts[rawParts.length - 1]));
+                currentTerminalInputBuffer = prefixBuffer + (match.includes(' ') ? `"${match}"` : match);
+              }
+              redrawShellLine();
+            }
+          }
+        }
+      } else if (data === '\x1b[A' || data === '\x1b[B') { // Arrow Up / Down
+        if (isShellMode && shellHistory.length > 0) {
+          if (data === '\x1b[A') { // Up
+            shellHistoryIndex = Math.min(shellHistory.length - 1, shellHistoryIndex + 1);
+          } else { // Down
+            shellHistoryIndex = Math.max(-1, shellHistoryIndex - 1);
+          }
+          currentTerminalInputBuffer = shellHistoryIndex >= 0 ? shellHistory[shellHistory.length - 1 - shellHistoryIndex] : '';
+          redrawShellLine();
+        }
+      } else if (data === '\x03') { // Ctrl+C
+        if (isShellMode) {
+          terminal.write('\x1b[35m^C\x1b[0m\r\n');
+          currentTerminalInputBuffer = '';
+          redrawShellLine();
+        }
+      } else if (data === '\x15') { // Ctrl+U
+        if (isShellMode && currentTerminalInputBuffer.length > 0) {
+          currentTerminalInputBuffer = '';
+          redrawShellLine();
+        }
+      } else {
+        if (!data.startsWith('\x1b') && data.charCodeAt(0) >= 32) {
+          if (isShellMode) {
+            currentTerminalInputBuffer += data;
+            redrawShellLine();
+          } else {
+            currentTerminalInputBuffer += data;
+            terminal.write('\x1b[35m' + data + '\x1b[0m');
+          }
+        }
+      }
+    });
+  }
+
   function appendConsoleLine(type, text, isRemote = false) {
-    const div = document.createElement('div');
-    div.className = `console-line ${type}`;
-    div.textContent = text;
-    consoleOutput.appendChild(div);
-    consoleOutput.scrollTop = consoleOutput.scrollHeight;
+    if (!terminal) initTerminal();
+    
+    let colorPrefix = '';
+    let colorSuffix = '\x1b[0m';
+    if (type === 'error') colorPrefix = '\x1b[31m'; // Red
+    else if (type === 'system') colorPrefix = '\x1b[36m'; // Cyan
+    else if (type === 'warn') colorPrefix = '\x1b[33m'; // Yellow
+    else if (type === 'success') colorPrefix = '\x1b[32m'; // Green
+    else if (type === 'input-echo') colorPrefix = '\x1b[35m'; // Magenta
+
+    // Add \r\n explicitly because Pyodide stdout was treated as a div block previously
+    const formatted = colorPrefix + text.replace(/\n/g, '\r\n') + colorSuffix + '\r\n';
+    terminal.write(formatted);
 
     if (!isRemote) {
       socket.emit('output-sync', { action: 'append', type: type, text: text });
     }
   }
 
+  function hideConsoleInput() {
+    isTerminalExpectingInput = false;
+    currentTerminalInputBuffer = '';
+  }
+
+  function showConsoleInput() {
+    if (!terminal) initTerminal();
+    
+    if (outputDrawer) outputDrawer.classList.remove('collapsed');
+    if (consoleOutput) consoleOutput.classList.remove('hidden');
+    
+    isTerminalExpectingInput = true;
+    currentTerminalInputBuffer = '';
+    
+    // Ensure terminal is properly sized when shown
+    setTimeout(() => { 
+      if (fitAddon) fitAddon.fit(); 
+      terminal.focus();
+    }, 50);
+  }
+
+  // Initialize terminal on boot
+  document.addEventListener('DOMContentLoaded', () => {
+    initTerminal();
+  });
+
   const copyConsoleBtn = document.getElementById('copyConsoleBtn');
   if (copyConsoleBtn) {
     copyConsoleBtn.addEventListener('click', () => {
-      const outputText = consoleOutput.innerText || consoleOutput.textContent;
-      if (!outputText.trim()) {
-        showToast('Console output is empty.', 'warning');
-        return;
+      if (terminal && terminal.hasSelection()) {
+        navigator.clipboard.writeText(terminal.getSelection()).then(() => {
+          showToast('📋 Terminal selection copied to clipboard!');
+        });
+      } else {
+        showToast('Highlight text in the terminal first to copy it.', 'warning');
       }
-      navigator.clipboard.writeText(outputText).then(() => {
-        showToast('📋 Console output copied to clipboard!');
-      }).catch(() => {
-        showToast('Failed to copy console output.', 'warning');
-      });
     });
   }
 
   document.getElementById('clearConsoleBtn').addEventListener('click', () => {
-    consoleOutput.innerHTML = '<div class="console-line system">[Cleared]</div>';
+    if (terminal) {
+      terminal.reset();
+      terminal.write('\x1b[36m[Cleared]\x1b[0m\r\n');
+    }
     updateOutputStatus('hidden');
     socket.emit('output-sync', { action: 'clear', message: '[Cleared]' });
   });
 
+  // The scroll listener isn't perfectly mapped to xterm.js natively without addon-scroll, 
+  // but we can omit it or leave as is.
   let isRemoteOutputScroll = false;
   if (consoleOutput) {
     consoleOutput.addEventListener('scroll', () => {
@@ -1152,8 +2761,15 @@ document.addEventListener('DOMContentLoaded', () => {
   // 6. UI Drawers, Share & Chat Logic
   // --------------------------------------------------------------------------
 
-  // Copy Room Link
-  roomShareBtn.addEventListener('click', () => {
+  // Copy Room Link (Only triggered when clicking the link icon)
+  roomShareBtn.addEventListener('click', (e) => {
+    if (!e.target.closest('.copy-icon')) {
+      return;
+    }
+    if (!isLiveSharingEnabled) {
+      showToast('⚠️ Sharing is disabled. Enable Live Code Sharing to copy room link!', 'warning');
+      return;
+    }
     const shareUrl = window.location.href;
     navigator.clipboard.writeText(shareUrl).then(() => {
       showToast('🔗 Room share link copied to clipboard!');
@@ -1178,16 +2794,64 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Sidebar Header & Nav Toggle Controls
   const sidebarCollapseBtn = document.getElementById('sidebarCollapseBtn');
+  const sidebarExpandBtn = document.getElementById('sidebarExpandBtn');
+  const workspaceContainer = document.querySelector('.workspace');
+
+  function updateSidebarToggleState() {
+    const isCollapsed = sidebar.classList.contains('collapsed');
+    if (workspaceContainer) {
+      if (isCollapsed) workspaceContainer.classList.add('has-collapsed-sidebar');
+      else workspaceContainer.classList.remove('has-collapsed-sidebar');
+    }
+    if (sidebarExpandBtn) {
+      if (isCollapsed) {
+        sidebarExpandBtn.classList.remove('hidden');
+      } else {
+        sidebarExpandBtn.classList.add('hidden');
+      }
+    }
+  }
+
+  function updateChatDrawerToggleState() {
+    const isCollapsed = chatDrawer.classList.contains('collapsed');
+    if (workspaceContainer) {
+      if (isCollapsed) workspaceContainer.classList.add('has-collapsed-chat');
+      else workspaceContainer.classList.remove('has-collapsed-chat');
+    }
+    if (chatDrawerExpandBtn) {
+      if (isCollapsed) {
+        chatDrawerExpandBtn.classList.remove('hidden');
+      } else {
+        chatDrawerExpandBtn.classList.add('hidden');
+      }
+    }
+  }
 
   if (sidebarCollapseBtn) {
     sidebarCollapseBtn.addEventListener('click', () => {
+      sidebar.classList.add('collapsed');
+      updateSidebarToggleState();
+    });
+  }
+
+  if (sidebarExpandBtn) {
+    sidebarExpandBtn.addEventListener('click', () => {
+      sidebar.classList.remove('collapsed');
+      updateSidebarToggleState();
+    });
+  }
+
+  if (toggleFilesBtn) {
+    toggleFilesBtn.addEventListener('click', () => {
       sidebar.classList.toggle('collapsed');
+      updateSidebarToggleState();
     });
   }
 
   if (toggleUsersBtn) {
     toggleUsersBtn.addEventListener('click', () => {
       sidebar.classList.toggle('collapsed');
+      updateSidebarToggleState();
     });
   }
 
@@ -1195,21 +2859,50 @@ document.addEventListener('DOMContentLoaded', () => {
   if (toggleChatBtn) {
     toggleChatBtn.addEventListener('click', () => {
       chatDrawer.classList.toggle('collapsed');
+      updateChatDrawerToggleState();
     });
   }
 
   const closeChatBtn = document.getElementById('closeChatBtn');
   if (closeChatBtn) {
     closeChatBtn.addEventListener('click', () => {
-      chatDrawer.classList.toggle('collapsed');
+      chatDrawer.classList.add('collapsed');
+      updateChatDrawerToggleState();
     });
   }
-  // Settings Dropdown Toggle
-  const settingsBtn = document.getElementById('settingsBtn');
-  const protectionPanel = document.getElementById('protectionPanel');
+
+  if (chatDrawerExpandBtn) {
+    chatDrawerExpandBtn.addEventListener('click', () => {
+      chatDrawer.classList.remove('collapsed');
+      updateChatDrawerToggleState();
+    });
+  }
+  
+  // Add global click listener for dropdowns
+  document.addEventListener('click', (e) => {
+    if (settingsBtn && settingsDropdown) {
+      if (!settingsBtn.contains(e.target) && !settingsDropdown.contains(e.target)) {
+        settingsDropdown.classList.add('hidden');
+      }
+    }
+    if (profileBtn && profileDropdown) {
+      if (!profileBtn.contains(e.target) && !profileDropdown.contains(e.target)) {
+        profileDropdown.classList.add('hidden');
+      }
+    }
+  });
+
+  if (profileBtn) {
+    profileBtn.addEventListener('click', () => {
+      profileDropdown.classList.toggle('hidden');
+      if (settingsDropdown) settingsDropdown.classList.add('hidden');
+    });
+  }
+
   if (settingsBtn) {
     settingsBtn.addEventListener('click', () => {
-      alert("not implemented yet");
+      settingsDropdown.classList.toggle('hidden');
+      if (profileDropdown) profileDropdown.classList.add('hidden');
     });
   }
 
@@ -1224,23 +2917,40 @@ document.addEventListener('DOMContentLoaded', () => {
       if (chatDrawer) chatDrawer.classList.remove('collapsed');
       if (protectionPanel) protectionPanel.classList.remove('show');
     }
+    updateSidebarToggleState();
+    updateChatDrawerToggleState();
   }
   mql.addEventListener('change', handleScreenChange);
   handleScreenChange(mql);
 
   // Chat Send
+  function updateSendChatBtnState() {
+    if (sendChatBtn && chatInput) {
+      sendChatBtn.disabled = chatInput.value.trim().length === 0;
+    }
+  }
+
   function sendChatMessage() {
     const text = chatInput.value.trim();
     if (text) {
       socket.emit('send-chat', { text });
       chatInput.value = '';
+      updateSendChatBtnState();
     }
   }
 
-  sendChatBtn.addEventListener('click', sendChatMessage);
-  chatInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') sendChatMessage();
-  });
+  if (sendChatBtn) {
+    sendChatBtn.addEventListener('click', sendChatMessage);
+  }
+  
+  if (chatInput) {
+    chatInput.addEventListener('input', updateSendChatBtnState);
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendChatMessage();
+    });
+  }
+
+  updateSendChatBtnState();
 
   function appendChatMessage(msg) {
     const div = document.createElement('div');
@@ -1282,7 +2992,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const ext = FILE_EXTENSIONS[roomLanguage] || 'txt';
-    const fileName = `codesync_${currentRoomId || 'share'}.${ext}`;
+    let fileName = currentActiveFile;
+    if (!fileName || fileName === 'Untitled' || fileName.startsWith('Untitled')) {
+      fileName = `script.${ext}`;
+    } else if (fileName.includes('/')) {
+      fileName = fileName.split('/').pop();
+    }
     const blob = new Blob([codeTextarea.value], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
 
@@ -1298,6 +3013,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Copy Code Button Handler
+  let copyCodeBtnResetTimer = null;
+  const originalCopyCodeBtnHTML = copyCodeBtn.innerHTML;
+
   copyCodeBtn.addEventListener('click', () => {
     if (isCopyDisabled && !isHost) {
       showToast('⚠️ Copying is locked because copy protection is enabled by room host!', 'warning');
@@ -1307,6 +3025,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     navigator.clipboard.writeText(codeTextarea.value).then(() => {
       showToast('📋 Code copied to clipboard!');
+
+      // Show checkmark tick for 3 seconds
+      if (copyCodeBtnResetTimer) {
+        clearTimeout(copyCodeBtnResetTimer);
+      }
+      copyCodeBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+      copyCodeBtn.classList.add('btn-copied');
+      
+      copyCodeBtnResetTimer = setTimeout(() => {
+        copyCodeBtn.innerHTML = originalCopyCodeBtnHTML;
+        copyCodeBtn.classList.remove('btn-copied');
+        copyCodeBtnResetTimer = null;
+      }, 3000);
     }).catch(() => {
       showToast('⚠️ Failed to copy code to clipboard.', 'warning');
     });
@@ -1317,36 +3048,64 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateRoleBadge() {
     const userRoleBadge = document.getElementById('userRoleBadge');
     if (!userRoleBadge) return;
+    const name = (currentUser && currentUser.name) ? currentUser.name : (savedUsername || 'You');
     if (isHost) {
       userRoleBadge.className = 'user-role-badge host';
-      userRoleBadge.textContent = 'Host';
+      userRoleBadge.textContent = `${name} (Host)`;
     } else {
       userRoleBadge.className = 'user-role-badge guest';
-      userRoleBadge.textContent = 'Guest';
+      userRoleBadge.textContent = `${name} (Guest)`;
     }
+  }
+
+  const userRoleBadgeEl = document.getElementById('userRoleBadge');
+  if (userRoleBadgeEl) {
+    userRoleBadgeEl.addEventListener('click', () => {
+      const currentName = currentUser ? currentUser.name : (savedUsername || '');
+      const inputName = prompt('Change your username:', currentName);
+      if (inputName && inputName.trim() && inputName.trim() !== currentName) {
+        const cleanName = inputName.trim();
+        savedUsername = cleanName;
+        if (currentUser) currentUser.name = cleanName;
+        try { localStorage.setItem('livecode_username', cleanName); } catch(e){}
+        socket.emit('update-username', { username: cleanName });
+        updateRoleBadge();
+        renderUsers();
+        showToast(`Username updated to ${cleanName}`);
+      }
+    });
   }
 
   // Users List Render
   function renderUsers() {
-    if (activeUserCount) activeUserCount.textContent = usersList.length;
+    if (activeUserCount) activeUserCount.textContent = isLiveSharingEnabled ? usersList.length : 1;
     const userTabCount = document.getElementById('userTabCount');
-    if (userTabCount) userTabCount.textContent = usersList.length;
+    if (userTabCount) userTabCount.textContent = isLiveSharingEnabled ? usersList.length : 1;
 
     userListContainer.innerHTML = '';
-    usersList.forEach(u => {
+    const displayList = isLiveSharingEnabled ? usersList : usersList.filter(u => u.id === socket.id);
+    displayList.forEach(u => {
       const card = document.createElement('div');
-      card.className = 'user-card';
+      card.style.display = 'flex';
+      card.style.justifyContent = 'space-between';
+      card.style.alignItems = 'center';
+      card.style.padding = '8px 12px';
+      card.style.borderBottom = '1px solid var(--border-light)';
+      const displayName = isLiveSharingEnabled ? u.name : (u.id === socket.id ? 'You (Offline Session)' : 'Anonymous');
+      const isTypingActive = Date.now() - lastTypingTime < 1500;
+      const isTypingNow = isLiveSharingEnabled && isTypingActive && u.id === activeRestingCursorUserId && u.id !== socket.id;
+      const statusText = isTypingNow ? '<span style="color: var(--accent-amber); font-weight: 600;">(typing...)</span>' : `Line ${u.cursor ? u.cursor.line : 1}, Col ${u.cursor ? u.cursor.ch : 1}`;
       card.innerHTML = `
-        <div class="user-info">
-          <div class="user-avatar" style="background-color: ${u.color}">
-            ${u.name.charAt(0).toUpperCase()}
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <div style="background-color: ${u.color}; width: 24px; height: 24px; font-size: 12px; font-weight: bold; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white;">
+            ${displayName.charAt(0).toUpperCase()}
           </div>
-          <div>
-            <div class="user-name">${escapeHtml(u.name)} ${u.id === socket.id ? '(You)' : ''}</div>
-            <div style="font-size: 0.7rem; color: var(--text-muted);">Line ${u.cursor ? u.cursor.line : 1}, Col ${u.cursor ? u.cursor.ch : 1}</div>
+          <div style="display: flex; flex-direction: column;">
+            <div style="font-size: 0.85rem; font-weight: 500; color: var(--text-primary);">${escapeHtml(displayName)}</div>
+            <div style="font-size: 0.7rem; color: var(--text-muted);">${statusText}</div>
           </div>
         </div>
-        <span class="role-pill ${u.isHost ? 'host' : 'editor'}">${u.isHost ? 'Host' : 'Editor'}</span>
+        <span class="role-pill ${u.isHost ? 'host' : 'editor'}" style="font-size: 0.65rem; padding: 2px 6px;">${u.isHost ? 'Host' : 'Editor'}</span>
       `;
       userListContainer.appendChild(card);
     });
