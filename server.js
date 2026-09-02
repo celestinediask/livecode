@@ -66,9 +66,13 @@ function getOrCreateRoom(roomId) {
       title: `Session ${roomId.toUpperCase()}`,
       code: DEFAULT_CODE.python,
       activeFile: 'Untitled',
+      openTabs: ['Untitled'],
       language: 'python',
       files: [],
       cwd: '/home/pyodide',
+      sidebarCollapsed: false,
+      collapsedFolders: [],
+      selectedFolder: '',
       hostSocketId: null,
       hostToken: null,
       hostReconnectTimer: null,
@@ -225,9 +229,13 @@ io.on('connection', (socket) => {
       roomId: room.id,
       code: room.code,
       activeFile: room.activeFile,
+      openTabs: room.openTabs || (room.activeFile ? [room.activeFile] : ['Untitled']),
       language: room.language,
       files: room.files || [],
       cwd: room.cwd || '/home/pyodide',
+      sidebarCollapsed: room.sidebarCollapsed ?? false,
+      collapsedFolders: room.collapsedFolders || [],
+      selectedFolder: room.selectedFolder || '',
       settings: room.settings,
       currentUser: currentUser,
       isHost: currentUser.isHost,
@@ -256,7 +264,7 @@ io.on('connection', (socket) => {
   });
 
   // Code Change Sync
-  socket.on('code-change', ({ code, cursor, activeFile }) => {
+  const handleCodeChange = ({ code, cursor, activeFile, openTabs }) => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
     const room = rooms.get(currentRoomId);
 
@@ -269,9 +277,14 @@ io.on('connection', (socket) => {
       return;
     }
 
-    room.code = code;
-    if (activeFile) {
+    if (code !== undefined) {
+      room.code = code;
+    }
+    if (activeFile !== undefined) {
       room.activeFile = activeFile;
+    }
+    if (Array.isArray(openTabs)) {
+      room.openTabs = openTabs;
     }
     
     if (currentUser && cursor) {
@@ -280,19 +293,188 @@ io.on('connection', (socket) => {
 
     // Broadcast updated code to other users in room
     socket.to(currentRoomId).emit('code-update', {
-      code: code,
+      code: room.code,
       senderId: socket.id,
       cursor: cursor,
-      activeFile: room.activeFile
+      activeFile: room.activeFile,
+      openTabs: room.openTabs
+    });
+  };
+
+  socket.on('code-change', handleCodeChange);
+  socket.on('code-update', handleCodeChange);
+
+  socket.on('file-system-sync', ({ files, cwd, sidebarCollapsed, collapsedFolders }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (files !== undefined) room.files = files;
+    if (cwd !== undefined) room.cwd = cwd;
+    if (sidebarCollapsed !== undefined) room.sidebarCollapsed = sidebarCollapsed;
+    if (Array.isArray(collapsedFolders)) room.collapsedFolders = collapsedFolders;
+    socket.to(currentRoomId).emit('file-system-update', {
+      files: room.files,
+      cwd: room.cwd,
+      sidebarCollapsed: room.sidebarCollapsed,
+      collapsedFolders: room.collapsedFolders
     });
   });
 
-  socket.on('file-system-sync', ({ files, cwd }) => {
+  socket.on('sidebar-toggle', ({ collapsed, collapsedFolders }) => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
     const room = rooms.get(currentRoomId);
-    room.files = files;
-    room.cwd = cwd;
-    socket.to(currentRoomId).emit('file-system-update', { files, cwd });
+    if (collapsed !== undefined) room.sidebarCollapsed = collapsed;
+    if (Array.isArray(collapsedFolders)) room.collapsedFolders = collapsedFolders;
+    socket.to(currentRoomId).emit('sidebar-update', {
+      collapsed: room.sidebarCollapsed,
+      collapsedFolders: room.collapsedFolders
+    });
+  });
+
+  // Real-time UI & Button Hover Sync
+  socket.on('btn-hover', ({ btnId, isHovered }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('btn-hover-update', { btnId, isHovered });
+  });
+
+  socket.on('tab-close-hover', ({ tabName, isHovered }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tab-close-hover-update', { tabName, isHovered });
+  });
+
+  socket.on('tab-hover', ({ tabName, isHovered }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tab-hover-update', { tabName, isHovered });
+  });
+
+  // Real-time File Tree Hover & Typing Interactions
+  socket.on('tree-hover', ({ path, isHovered }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-hover-update', { path, isHovered, userId: socket.id });
+  });
+
+  socket.on('tree-action-hover', ({ path, action, isHovered }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-action-hover-update', { path, action, isHovered, userId: socket.id });
+  });
+
+  socket.on('tree-rename-start', ({ path, initialName, cursor }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-rename-start', { path, initialName, cursor, senderId: socket.id });
+  });
+
+  socket.on('tree-rename-input', ({ path, value, cursor }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-rename-input', { path, value, cursor, senderId: socket.id });
+  });
+
+  socket.on('tree-rename-cursor', ({ path, cursor }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-rename-cursor-update', { path, cursor, senderId: socket.id });
+  });
+
+  socket.on('tree-rename-end', ({ path }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-rename-end', { path, senderId: socket.id });
+  });
+
+  socket.on('tree-create-start', ({ type, parentFolder, cursor }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-create-start', { type, parentFolder, cursor, senderId: socket.id });
+  });
+
+  socket.on('tree-create-input', ({ value, cursor }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-create-input', { value, cursor, senderId: socket.id });
+  });
+
+  socket.on('tree-create-cursor', ({ cursor }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-create-cursor-update', { cursor, senderId: socket.id });
+  });
+
+  socket.on('tree-create-end', () => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-create-end', { senderId: socket.id });
+  });
+
+  socket.on('tree-select', ({ path }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    room.selectedFolder = path || '';
+    socket.to(currentRoomId).emit('tree-select-update', {
+      path: room.selectedFolder,
+      userId: socket.id
+    });
+  });
+
+  // Real-time Tree Drag & Drop Sync
+  socket.on('tree-drag-start', ({ path }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-drag-start-update', {
+      path: path,
+      userId: socket.id
+    });
+  });
+
+  socket.on('tree-drag-over', ({ targetPath, isFolder, isRoot }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-drag-over-update', {
+      targetPath,
+      isFolder,
+      isRoot,
+      userId: socket.id
+    });
+  });
+
+  socket.on('tree-drag-leave', ({ targetPath, isRoot }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-drag-leave-update', {
+      targetPath,
+      isRoot,
+      userId: socket.id
+    });
+  });
+
+  socket.on('tree-drag-end', () => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (!room.settings.liveSharingEnabled) return;
+    socket.to(currentRoomId).emit('tree-drag-end-update', {
+      userId: socket.id
+    });
   });
 
   // Cursor position updates
@@ -437,11 +619,14 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('request-shell-command', ({ command, currentCode, activeFile, skipPrompt }) => {
+  socket.on('request-shell-command', ({ command, currentCode, activeFile, openTabs, skipPrompt }) => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
     const room = rooms.get(currentRoomId);
+    if (Array.isArray(openTabs)) {
+      room.openTabs = openTabs;
+    }
     if (room.hostSocketId) {
-      io.to(room.hostSocketId).emit('execute-shell', { command, currentCode, activeFile, skipPrompt });
+      io.to(room.hostSocketId).emit('execute-shell', { command, currentCode, activeFile, openTabs, skipPrompt });
     }
   });
 
@@ -486,9 +671,13 @@ io.on('connection', (socket) => {
               roomId: room.id,
               code: room.code,
               activeFile: room.activeFile,
+              openTabs: room.openTabs || (room.activeFile ? [room.activeFile] : ['Untitled']),
               language: room.language,
               files: room.files || [],
               cwd: room.cwd || '/home/pyodide',
+              sidebarCollapsed: room.sidebarCollapsed ?? false,
+              collapsedFolders: room.collapsedFolders || [],
+              selectedFolder: room.selectedFolder || '',
               settings: room.settings,
               currentUser: usr,
               isHost: false,
@@ -505,33 +694,6 @@ io.on('connection', (socket) => {
       settings: room.settings,
       updatedBy: currentUser ? currentUser.name : 'Host'
     });
-
-    // Notify in chat of security toggle
-    let changeDesc = [];
-    if (newSettings.copyDisabled !== undefined) {
-      changeDesc.push(`Copy protection ${newSettings.copyDisabled ? 'ENABLED 🔒' : 'DISABLED 🔓'}`);
-    }
-    if (newSettings.pasteDisabled !== undefined) {
-      changeDesc.push(`Paste protection ${newSettings.pasteDisabled ? 'ENABLED 🚫' : 'DISABLED 🔓'}`);
-    }
-    if (newSettings.readOnly !== undefined) {
-      changeDesc.push(`Read-only mode ${newSettings.readOnly ? 'ENABLED 👁️' : 'DISABLED ✏️'}`);
-    }
-    if (newSettings.syntaxHighlight !== undefined) {
-      changeDesc.push(`Syntax highlighting ${newSettings.syntaxHighlight ? 'ENABLED 🎨' : 'DISABLED ⚪'}`);
-    }
-
-    if (changeDesc.length > 0) {
-      const sysMsg = {
-        id: Date.now().toString(),
-        sender: 'Security',
-        text: `Security update: ${changeDesc.join(', ')}`,
-        isSystem: true,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      room.chat.push(sysMsg);
-      io.to(currentRoomId).emit('chat-message', sysMsg);
-    }
   });
 
   // Copy Violation Report (When user attempts to copy while copy protection is enabled)

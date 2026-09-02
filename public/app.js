@@ -36,6 +36,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const fileSavedContents = new Map();
   const tabBufferMap = new Map();
   const remoteCursors = new Map();
+  let syncedHoveredTreePath = null;
+  let syncedHoveredTreeAction = null;
+  let syncedHoveredTabName = null;
+  let syncedDraggingPath = null;
+  let syncedDragOverPath = null;
+  let syncedRootDragOver = false;
+  let renamingValue = '';
+  let renamingCursor = null;
+  let localRenaming = false;
+  let localCreating = false;
 
   // DOM Element References
   const displayRoomId = document.getElementById('displayRoomId');
@@ -163,14 +173,34 @@ document.addEventListener('DOMContentLoaded', () => {
     roomCode = state.code;
     codeTextarea.value = roomCode;
     
-    if (state.activeFile) currentActiveFile = state.activeFile;
-    if (!openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
+    if (state.openTabs && Array.isArray(state.openTabs)) {
+      openTabs = [...state.openTabs];
+    } else {
+      openTabs = state.activeFile ? [state.activeFile] : ['Untitled'];
+    }
+    if (state.activeFile !== undefined) currentActiveFile = state.activeFile;
+    if (currentActiveFile && !openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
     if (state.files && state.files.length > 0) {
       shellFiles = state.files;
     } else {
       shellFiles = [];
     }
     if (state.cwd) currentShellCwd = state.cwd;
+    if (state.sidebarCollapsed !== undefined) {
+      if (state.sidebarCollapsed) {
+        sidebar.classList.add('collapsed');
+      } else {
+        sidebar.classList.remove('collapsed');
+      }
+      updateSidebarToggleState();
+    }
+    if (state.collapsedFolders && Array.isArray(state.collapsedFolders)) {
+      collapsedFolders.clear();
+      state.collapsedFolders.forEach(f => collapsedFolders.add(f));
+    }
+    if (state.selectedFolder !== undefined) {
+      selectedFolder = state.selectedFolder || '';
+    }
     renderFilesList();
     renderTabs();
     
@@ -216,17 +246,23 @@ document.addEventListener('DOMContentLoaded', () => {
     applyProtectionSettings(settings);
   });
 
-  socket.on('code-update', ({ code, senderId, cursor, activeFile }) => {
-    if (activeFile) {
-      currentActiveFile = activeFile;
-      if (!openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
-      renderFilesList();
-      renderTabs();
+  socket.on('code-update', ({ code, senderId, cursor, activeFile, openTabs: newOpenTabs }) => {
+    if (Array.isArray(newOpenTabs)) {
+      openTabs = [...newOpenTabs];
     }
+    if (activeFile !== undefined && activeFile !== null) {
+      currentActiveFile = activeFile;
+      if (activeFile && !openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
+    }
+    renderFilesList();
+    renderTabs();
     if (senderId !== socket.id) {
       const cursorPos = codeTextarea.selectionStart;
       codeTextarea.value = code;
       roomCode = code;
+      if (currentActiveFile) {
+        tabBufferMap.set(currentActiveFile, code);
+      }
       codeTextarea.setSelectionRange(cursorPos, cursorPos);
       
       if (senderId && cursor) {
@@ -275,13 +311,349 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     renderUsers();
     renderCollaboratorCursors();
+    renderFilesList();
   });
 
-  socket.on('file-system-update', ({ files, cwd }) => {
-    shellFiles = files && files.length > 0 ? files : [];
-    try { localStorage.setItem('livecode_files', JSON.stringify(shellFiles)); } catch(e){}
-    currentShellCwd = cwd;
+  // UI Button Hover Sync
+  socket.on('btn-hover-update', ({ btnId, isHovered }) => {
+    const btn = document.getElementById(btnId);
+    if (btn) {
+      if (isHovered) btn.classList.add('is-hovered');
+      else btn.classList.remove('is-hovered');
+    }
+  });
+
+  // Tab Hover Sync
+  socket.on('tab-hover-update', ({ tabName, isHovered }) => {
+    if (isHovered) syncedHoveredTabName = tabName;
+    else if (syncedHoveredTabName === tabName) syncedHoveredTabName = null;
+    const tabsContainer = document.getElementById('editorTabs');
+    if (tabsContainer) {
+      const tabs = tabsContainer.querySelectorAll('.editor-tab');
+      tabs.forEach(t => {
+        const titleSpan = t.querySelector('span[title]');
+        if (titleSpan && titleSpan.getAttribute('title') === tabName) {
+          if (isHovered) t.classList.add('is-hovered');
+          else t.classList.remove('is-hovered');
+        }
+      });
+    }
+  });
+
+  // Tab Close Button Hover Sync
+  socket.on('tab-close-hover-update', ({ tabName, isHovered }) => {
+    const tabsContainer = document.getElementById('editorTabs');
+    if (tabsContainer) {
+      const tabs = tabsContainer.querySelectorAll('.editor-tab');
+      tabs.forEach(t => {
+        const titleSpan = t.querySelector('span[title]');
+        if (titleSpan && titleSpan.getAttribute('title') === tabName) {
+          const closeBtn = t.querySelector('.editor-tab-close');
+          if (closeBtn) {
+            if (isHovered) closeBtn.classList.add('is-hovered');
+            else closeBtn.classList.remove('is-hovered');
+          }
+        }
+      });
+    }
+  });
+
+  function getTextWidth(text, font) {
+    const canvas = getTextWidth.canvas || (getTextWidth.canvas = document.createElement('canvas'));
+    const context = canvas.getContext('2d');
+    context.font = font || '13.6px monospace';
+    return context.measureText(text).width;
+  }
+
+  function updateInputCursorDisplay(inputEl, cursor) {
+    if (!inputEl || !cursor) return;
+    const wrapper = inputEl.closest('.inline-input-wrapper');
+    if (!wrapper) return;
+
+    let caretEl = wrapper.querySelector('.remote-input-caret');
+    let selEl = wrapper.querySelector('.remote-input-selection');
+
+    if (!caretEl) {
+      caretEl = document.createElement('div');
+      caretEl.className = 'remote-input-caret';
+      wrapper.appendChild(caretEl);
+    }
+    if (!selEl) {
+      selEl = document.createElement('div');
+      selEl.className = 'remote-input-selection';
+      wrapper.appendChild(selEl);
+    }
+
+    const val = inputEl.value || '';
+    const style = window.getComputedStyle(inputEl);
+    const font = `${style.fontSize} ${style.fontFamily}`;
+    const padLeft = parseFloat(style.paddingLeft) || 4;
+
+    const startPos = Math.min(cursor.start, val.length);
+    const endPos = Math.min(cursor.end, val.length);
+
+    const leftWidth = getTextWidth(val.slice(0, startPos), font);
+
+    if (startPos !== endPos) {
+      const selWidth = getTextWidth(val.slice(startPos, endPos), font);
+      selEl.style.display = 'block';
+      selEl.style.left = `${padLeft + leftWidth - inputEl.scrollLeft}px`;
+      selEl.style.width = `${selWidth}px`;
+      caretEl.style.display = 'none';
+    } else {
+      selEl.style.display = 'none';
+      caretEl.style.display = 'block';
+      caretEl.style.left = `${padLeft + leftWidth - inputEl.scrollLeft}px`;
+    }
+  }
+
+  // File Tree Item Hover Sync
+  socket.on('tree-hover-update', ({ path, isHovered }) => {
+    if (isHovered) {
+      syncedHoveredTreePath = path;
+    } else if (syncedHoveredTreePath === path) {
+      syncedHoveredTreePath = null;
+    }
+    const fileListContainer = document.getElementById('fileListContainer');
+    if (fileListContainer) {
+      const items = fileListContainer.querySelectorAll('.user-item');
+      items.forEach(item => {
+        if (item.dataset.path === path) {
+          if (isHovered) item.classList.add('is-hovered');
+          else item.classList.remove('is-hovered');
+        } else if (!isHovered && !syncedHoveredTreePath) {
+          item.classList.remove('is-hovered');
+        }
+      });
+    }
+  });
+
+  // File Tree Action Buttons (Rename / Delete) Hover Sync
+  socket.on('tree-action-hover-update', ({ path, action, isHovered }) => {
+    if (isHovered) {
+      syncedHoveredTreeAction = { path, action };
+      syncedHoveredTreePath = path;
+    } else if (syncedHoveredTreeAction && syncedHoveredTreeAction.path === path && syncedHoveredTreeAction.action === action) {
+      syncedHoveredTreeAction = null;
+    }
+    const fileListContainer = document.getElementById('fileListContainer');
+    if (fileListContainer) {
+      const items = fileListContainer.querySelectorAll('.user-item');
+      items.forEach(item => {
+        if (item.dataset.path === path) {
+          if (isHovered) item.classList.add('is-hovered');
+          const btn = action === 'rename' ? item.querySelector('.rename-btn') : item.querySelector('.delete-btn');
+          if (btn) {
+            if (isHovered) btn.classList.add('is-hovered');
+            else btn.classList.remove('is-hovered');
+          }
+        }
+      });
+    }
+  });
+
+  // Realtime Rename Sync
+  socket.on('tree-rename-start', ({ path, initialName, cursor, senderId }) => {
+    if (senderId !== socket.id) {
+      localRenaming = false;
+      renamingPath = path;
+      renamingValue = initialName || '';
+      renamingCursor = cursor || { start: (initialName || '').length, end: (initialName || '').length };
+      renderFilesList();
+      setTimeout(() => {
+        const inputEl = document.querySelector('.inline-rename-input');
+        if (inputEl) updateInputCursorDisplay(inputEl, renamingCursor);
+      }, 0);
+    }
+  });
+
+  socket.on('tree-rename-input', ({ path, value, cursor, senderId }) => {
+    if (senderId !== socket.id) {
+      renamingPath = path;
+      renamingValue = value || '';
+      if (cursor) renamingCursor = cursor;
+      const inputEl = document.querySelector('.inline-rename-input');
+      if (inputEl) {
+        inputEl.value = renamingValue;
+        updateInputCursorDisplay(inputEl, renamingCursor);
+      } else {
+        renderFilesList();
+      }
+    }
+  });
+
+  socket.on('tree-rename-cursor-update', ({ path, cursor, senderId }) => {
+    if (senderId !== socket.id && renamingPath === path) {
+      renamingCursor = cursor;
+      const inputEl = document.querySelector('.inline-rename-input');
+      if (inputEl) {
+        updateInputCursorDisplay(inputEl, renamingCursor);
+      }
+    }
+  });
+
+  socket.on('tree-rename-end', ({ path }) => {
+    if (renamingPath === path || !path) {
+      renamingPath = null;
+      renamingValue = '';
+      renamingCursor = null;
+      localRenaming = false;
+      renderFilesList();
+    }
+  });
+
+  // Realtime Inline Create Sync
+  socket.on('tree-create-start', ({ type, parentFolder, cursor, senderId }) => {
+    if (senderId !== socket.id) {
+      localCreating = false;
+      inlineCreatingItem = { type, parentFolder, value: '', cursor: cursor || { start: 0, end: 0 } };
+      renderFilesList();
+      setTimeout(() => {
+        const inputEl = document.querySelector('.inline-create-input');
+        if (inputEl) updateInputCursorDisplay(inputEl, inlineCreatingItem.cursor);
+      }, 0);
+    }
+  });
+
+  socket.on('tree-create-input', ({ value, cursor, senderId }) => {
+    if (senderId !== socket.id && inlineCreatingItem) {
+      inlineCreatingItem.value = value || '';
+      if (cursor) inlineCreatingItem.cursor = cursor;
+      const inputEl = document.querySelector('.inline-create-input');
+      if (inputEl) {
+        inputEl.value = inlineCreatingItem.value;
+        updateInputCursorDisplay(inputEl, inlineCreatingItem.cursor);
+      }
+    }
+  });
+
+  socket.on('tree-create-cursor-update', ({ cursor, senderId }) => {
+    if (senderId !== socket.id && inlineCreatingItem) {
+      inlineCreatingItem.cursor = cursor;
+      const inputEl = document.querySelector('.inline-create-input');
+      if (inputEl) {
+        updateInputCursorDisplay(inputEl, inlineCreatingItem.cursor);
+      }
+    }
+  });
+
+  socket.on('tree-create-end', () => {
+    inlineCreatingItem = null;
+    localCreating = false;
     renderFilesList();
+  });
+
+  socket.on('tree-select-update', ({ path }) => {
+    selectedFolder = path || '';
+    renderFilesList();
+  });
+
+  // Real-time Tree Drag & Drop Sync
+  socket.on('tree-drag-start-update', ({ path, userId }) => {
+    syncedDraggingPath = path;
+    const fileListContainer = document.getElementById('fileListContainer');
+    if (fileListContainer) {
+      const items = fileListContainer.querySelectorAll('.user-item');
+      items.forEach(item => {
+        if (item.dataset.path === path) {
+          item.classList.add('is-dragging');
+        }
+      });
+    }
+  });
+
+  socket.on('tree-drag-over-update', ({ targetPath, isFolder, isRoot }) => {
+    syncedDragOverPath = targetPath || null;
+    syncedRootDragOver = !!isRoot;
+    const fileListContainer = document.getElementById('fileListContainer');
+    if (fileListContainer) {
+      if (isRoot) {
+        fileListContainer.classList.add('root-drag-over');
+      } else {
+        fileListContainer.classList.remove('root-drag-over');
+      }
+      const items = fileListContainer.querySelectorAll('.user-item');
+      items.forEach(item => {
+        if (isFolder && targetPath && item.dataset.path === targetPath) {
+          item.classList.add('drag-folder-over');
+        } else {
+          item.classList.remove('drag-folder-over');
+        }
+      });
+    }
+  });
+
+  socket.on('tree-drag-leave-update', ({ targetPath, isRoot }) => {
+    const fileListContainer = document.getElementById('fileListContainer');
+    if (fileListContainer) {
+      if (isRoot) {
+        fileListContainer.classList.remove('root-drag-over');
+        syncedRootDragOver = false;
+      }
+      if (targetPath) {
+        const items = fileListContainer.querySelectorAll('.user-item');
+        items.forEach(item => {
+          if (item.dataset.path === targetPath) {
+            item.classList.remove('drag-folder-over');
+          }
+        });
+        if (syncedDragOverPath === targetPath) {
+          syncedDragOverPath = null;
+        }
+      }
+    }
+  });
+
+  socket.on('tree-drag-end-update', () => {
+    syncedDraggingPath = null;
+    syncedDragOverPath = null;
+    syncedRootDragOver = false;
+    const fileListContainer = document.getElementById('fileListContainer');
+    if (fileListContainer) {
+      fileListContainer.classList.remove('root-drag-over');
+      const items = fileListContainer.querySelectorAll('.user-item');
+      items.forEach(item => {
+        item.classList.remove('is-dragging');
+        item.classList.remove('drag-folder-over');
+      });
+    }
+  });
+
+  socket.on('file-system-update', ({ files, cwd, sidebarCollapsed, collapsedFolders: remoteCollapsedFolders }) => {
+    if (files !== undefined) {
+      shellFiles = files && files.length > 0 ? files : [];
+      try { localStorage.setItem('livecode_files', JSON.stringify(shellFiles)); } catch(e){}
+    }
+    if (cwd !== undefined) currentShellCwd = cwd;
+    if (sidebarCollapsed !== undefined) {
+      if (sidebarCollapsed) {
+        sidebar.classList.add('collapsed');
+      } else {
+        sidebar.classList.remove('collapsed');
+      }
+      updateSidebarToggleState();
+    }
+    if (Array.isArray(remoteCollapsedFolders)) {
+      collapsedFolders.clear();
+      remoteCollapsedFolders.forEach(f => collapsedFolders.add(f));
+    }
+    renderFilesList();
+  });
+
+  socket.on('sidebar-update', ({ collapsed, collapsedFolders: remoteCollapsedFolders }) => {
+    if (collapsed !== undefined) {
+      if (collapsed) {
+        sidebar.classList.add('collapsed');
+      } else {
+        sidebar.classList.remove('collapsed');
+      }
+      updateSidebarToggleState();
+    }
+    if (Array.isArray(remoteCollapsedFolders)) {
+      collapsedFolders.clear();
+      remoteCollapsedFolders.forEach(f => collapsedFolders.add(f));
+      renderFilesList();
+    }
   });
 
   socket.on('cursor-update', ({ userId, cursor }) => {
@@ -376,7 +748,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  socket.on('execute-shell', ({ command, currentCode, activeFile, skipPrompt }) => {
+  socket.on('execute-shell', ({ command, currentCode, activeFile, openTabs: reqTabs, skipPrompt }) => {
+    if (reqTabs && Array.isArray(reqTabs)) {
+      openTabs = [...reqTabs];
+      renderTabs();
+    }
     if (isHost) {
       const worker = getOrInitWorker();
       if (worker) worker.postMessage({ type: 'shell', command: command, currentCode: currentCode, activeFile: activeFile || currentActiveFile, skipPrompt: skipPrompt });
@@ -456,12 +832,27 @@ document.addEventListener('DOMContentLoaded', () => {
     roomCode = state.code;
     codeTextarea.value = roomCode;
     
-    if (state.activeFile) currentActiveFile = state.activeFile;
-    if (!openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
+    if (state.openTabs && Array.isArray(state.openTabs)) {
+      openTabs = [...state.openTabs];
+    }
+    if (state.activeFile !== undefined) currentActiveFile = state.activeFile;
+    if (currentActiveFile && !openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
     if (state.files && state.files.length > 0) {
       shellFiles = state.files;
     }
     if (state.cwd) currentShellCwd = state.cwd;
+    if (state.sidebarCollapsed !== undefined) {
+      if (state.sidebarCollapsed) {
+        sidebar.classList.add('collapsed');
+      } else {
+        sidebar.classList.remove('collapsed');
+      }
+      updateSidebarToggleState();
+    }
+    if (state.collapsedFolders && Array.isArray(state.collapsedFolders)) {
+      collapsedFolders.clear();
+      state.collapsedFolders.forEach(f => collapsedFolders.add(f));
+    }
     renderFilesList();
     renderTabs();
     
@@ -524,6 +915,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (htmlPreviewContainer) htmlPreviewContainer.classList.add('hidden');
 
     if (data.action === 'clear') {
+      if (!terminal) initTerminal();
       if (terminal) {
         terminal.reset();
         if (data.message) {
@@ -535,14 +927,22 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (data.action === 'status') {
       updateOutputStatus(data.status, data.text, true);
     } else if (data.action === 'input_request') {
+      if (!terminal) initTerminal();
       if (data.text && terminal) {
-        // Write prompt text inline without a newline
         terminal.write(`\x1b[36m${data.text}\x1b[0m`);
       }
       showConsoleInput();
+    } else if (data.action === 'shell_command') {
+      if (!terminal) initTerminal();
+      if (terminal) {
+        const cwd = data.cwd !== undefined ? data.cwd : '~';
+        terminal.write(`\r\x1b[2K\x1b[1;34m${cwd}\x1b[32m$ \x1b[0m${data.cmd}\r\n`);
+      }
     } else if (data.action === 'shell_prompt') {
-      if (data.text && terminal) {
-        terminal.write(`\x1b[32m${data.text}\x1b[0m`);
+      if (!terminal) initTerminal();
+      if (terminal) {
+        const cwd = data.cwd !== undefined ? data.cwd : (data.text ? data.text.replace(/\$\s*$/, '') : '~');
+        terminal.write(`\r\x1b[2K\x1b[1;34m${cwd}\x1b[32m$ \x1b[0m`);
       }
       isShellMode = true;
       showConsoleInput();
@@ -1536,7 +1936,12 @@ builtins.input = custom_input
             }
             if (e.data.cwd) currentShellCwd = e.data.cwd;
             renderFilesList();
-            socket.emit('file-system-sync', { files: shellFiles, cwd: currentShellCwd });
+            socket.emit('file-system-sync', {
+              files: shellFiles,
+              cwd: currentShellCwd,
+              sidebarCollapsed: sidebar ? sidebar.classList.contains('collapsed') : false,
+              collapsedFolders: Array.from(collapsedFolders)
+            });
             
             if (!isExecutionRunning) updateOutputStatus('hidden');
           }
@@ -1560,7 +1965,12 @@ builtins.input = custom_input
           }
           if (e.data.cwd) currentShellCwd = e.data.cwd;
           renderFilesList();
-          socket.emit('file-system-sync', { files: shellFiles, cwd: currentShellCwd });
+          socket.emit('file-system-sync', {
+            files: shellFiles,
+            cwd: currentShellCwd,
+            sidebarCollapsed: sidebar ? sidebar.classList.contains('collapsed') : false,
+            collapsedFolders: Array.from(collapsedFolders)
+          });
           if (!e.data.skipPrompt) {
             startShellMode();
           }
@@ -1581,11 +1991,11 @@ builtins.input = custom_input
           } else {
             unsavedFiles.add(e.data.filename);
           }
-          if (!openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
+          if (currentActiveFile && !openTabs.includes(currentActiveFile)) openTabs.push(currentActiveFile);
           updateEditorDisplay();
           renderFilesList();
           renderTabs();
-          socket.emit('code-update', { code: roomCode, senderId: socket.id, cursor: null, activeFile: currentActiveFile });
+          socket.emit('code-change', { code: roomCode, cursor: null, activeFile: currentActiveFile, openTabs: openTabs });
         }
       };
 
@@ -1729,6 +2139,7 @@ builtins.input = custom_input
         });
       }
       renderFilesList();
+      emitSidebarState();
     });
   }
 
@@ -1737,6 +2148,19 @@ builtins.input = custom_input
       refreshFilesTree();
     });
   }
+
+  // Live Sync Hover on sidebar header buttons
+  ['createFileBtn', 'createFolderBtn', 'collapseFoldersBtn', 'refreshFilesBtn'].forEach(btnId => {
+    const btn = document.getElementById(btnId);
+    if (btn) {
+      btn.addEventListener('mouseenter', () => {
+        socket.emit('btn-hover', { btnId, isHovered: true });
+      });
+      btn.addEventListener('mouseleave', () => {
+        socket.emit('btn-hover', { btnId, isHovered: false });
+      });
+    }
+  });
 
   function refreshFilesTree() {
     if (isHost) {
@@ -1754,8 +2178,10 @@ builtins.input = custom_input
       if (selectedFolder && collapsedFolders.has(selectedFolder)) {
         collapsedFolders.delete(selectedFolder);
       }
-      inlineCreatingItem = { type: 'file', parentFolder: selectedFolder };
+      localCreating = true;
+      inlineCreatingItem = { type: 'file', parentFolder: selectedFolder, value: '', cursor: { start: 0, end: 0 } };
       renderFilesList();
+      socket.emit('tree-create-start', { type: 'file', parentFolder: selectedFolder, cursor: { start: 0, end: 0 } });
     });
   }
 
@@ -1764,13 +2190,21 @@ builtins.input = custom_input
       if (selectedFolder && collapsedFolders.has(selectedFolder)) {
         collapsedFolders.delete(selectedFolder);
       }
-      inlineCreatingItem = { type: 'folder', parentFolder: selectedFolder };
+      localCreating = true;
+      inlineCreatingItem = { type: 'folder', parentFolder: selectedFolder, value: '', cursor: { start: 0, end: 0 } };
       renderFilesList();
+      socket.emit('tree-create-start', { type: 'folder', parentFolder: selectedFolder, cursor: { start: 0, end: 0 } });
     });
   }
 
-  function openFileInTab(filename) {
-    if (!openTabs.includes(filename)) {
+  function openFileInTab(filename, customTabs = null) {
+    if (customTabs && Array.isArray(customTabs)) {
+      openTabs = [...customTabs];
+    }
+    if (currentActiveFile && codeTextarea) {
+      tabBufferMap.set(currentActiveFile, codeTextarea.value);
+    }
+    if (filename && !openTabs.includes(filename)) {
       openTabs.push(filename);
     }
     renderTabs();
@@ -1779,10 +2213,11 @@ builtins.input = custom_input
         const worker = getOrInitWorker();
         if (worker) worker.postMessage({ type: 'shell', command: 'open ' + filename, activeFile: currentActiveFile, skipPrompt: true });
       } else {
-        socket.emit('request-shell-command', { command: 'open ' + filename, activeFile: currentActiveFile, skipPrompt: true });
+        socket.emit('request-shell-command', { command: 'open ' + filename, activeFile: currentActiveFile, openTabs: openTabs, skipPrompt: true });
       }
     } else {
       renderFilesList();
+      socket.emit('code-change', { code: roomCode, cursor: null, activeFile: currentActiveFile, openTabs: openTabs });
     }
   }
 
@@ -1794,7 +2229,8 @@ builtins.input = custom_input
     openTabs.forEach(tabName => {
       const tabEl = document.createElement('div');
       const isUnsaved = unsavedFiles.has(tabName);
-      tabEl.className = `editor-tab ${tabName === currentActiveFile ? 'active' : ''} ${isUnsaved ? 'unsaved' : ''}`;
+      const isHovered = syncedHoveredTabName === tabName;
+      tabEl.className = `editor-tab ${tabName === currentActiveFile ? 'active' : ''} ${isUnsaved ? 'unsaved' : ''} ${isHovered ? 'is-hovered' : ''}`;
       tabEl.innerHTML = `
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink: 0;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
         <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;" title="${tabName}">${tabName}</span>
@@ -1804,6 +2240,13 @@ builtins.input = custom_input
         </div>
       `;
       
+      tabEl.addEventListener('mouseenter', () => {
+        socket.emit('tab-hover', { tabName, isHovered: true });
+      });
+      tabEl.addEventListener('mouseleave', () => {
+        socket.emit('tab-hover', { tabName, isHovered: false });
+      });
+
       tabEl.addEventListener('click', (e) => {
         if (e.target.closest('.editor-tab-close')) return;
         if (tabName !== currentActiveFile) {
@@ -1812,27 +2255,37 @@ builtins.input = custom_input
       });
       
       const closeBtn = tabEl.querySelector('.editor-tab-close');
-      closeBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        openTabs = openTabs.filter(t => t !== tabName);
-        if (openTabs.length === 0) {
-          currentActiveFile = '';
-          if (codeTextarea) codeTextarea.value = '';
-          roomCode = '';
-          updateEditorDisplay();
-          renderTabs();
-          renderFilesList();
-          socket.emit('code-update', { code: roomCode, senderId: socket.id, cursor: null, activeFile: '' });
-          return;
-        }
-        
-        if (tabName === currentActiveFile) {
-          const nextTab = openTabs[openTabs.length - 1];
-          openFileInTab(nextTab);
-        } else {
-          renderTabs();
-        }
-      });
+      if (closeBtn) {
+        closeBtn.addEventListener('mouseenter', () => {
+          socket.emit('tab-close-hover', { tabName, isHovered: true });
+        });
+        closeBtn.addEventListener('mouseleave', () => {
+          socket.emit('tab-close-hover', { tabName, isHovered: false });
+        });
+        closeBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          socket.emit('tab-close-hover', { tabName, isHovered: false });
+          openTabs = openTabs.filter(t => t !== tabName);
+          if (openTabs.length === 0) {
+            currentActiveFile = '';
+            if (codeTextarea) codeTextarea.value = '';
+            roomCode = '';
+            updateEditorDisplay();
+            renderTabs();
+            renderFilesList();
+            socket.emit('code-change', { code: roomCode, cursor: null, activeFile: '', openTabs: openTabs });
+            return;
+          }
+          
+          if (tabName === currentActiveFile) {
+            const nextTab = openTabs[openTabs.length - 1];
+            openFileInTab(nextTab, openTabs);
+          } else {
+            renderTabs();
+            socket.emit('code-change', { code: roomCode, cursor: null, activeFile: currentActiveFile, openTabs: openTabs });
+          }
+        });
+      }
       
       tabsContainer.appendChild(tabEl);
     });
@@ -1848,6 +2301,8 @@ builtins.input = custom_input
     const type = inlineCreatingItem.type;
     const parentFolder = inlineCreatingItem.parentFolder;
     inlineCreatingItem = null;
+    localCreating = false;
+    socket.emit('tree-create-end');
 
     if (!cleanName) {
       renderFilesList();
@@ -1872,6 +2327,7 @@ builtins.input = custom_input
       }
       selectedFolder = folderPath;
       renderFilesList();
+      socket.emit('tree-select', { path: selectedFolder });
     } else {
       const cmd = `touch "${fullPath}"`;
       sendShellCommand(cmd);
@@ -1888,7 +2344,7 @@ builtins.input = custom_input
       updateEditorDisplay();
       renderTabs();
       renderFilesList();
-      socket.emit('code-update', { code: roomCode, senderId: socket.id, cursor: null, activeFile: currentActiveFile });
+      socket.emit('code-change', { code: roomCode, cursor: null, activeFile: currentActiveFile, openTabs: openTabs });
       if (codeTextarea) {
         setTimeout(() => {
           codeTextarea.focus();
@@ -1899,13 +2355,17 @@ builtins.input = custom_input
   }
 
   function sendShellCommand(cmd) {
+    let displayCwd = currentShellCwd.startsWith('/home/pyodide') 
+      ? currentShellCwd.replace('/home/pyodide', '~') 
+      : currentShellCwd;
+    if (displayCwd === '') displayCwd = '~';
+
+    if (!terminal) initTerminal();
     if (terminal) {
-      let displayCwd = currentShellCwd.startsWith('/home/pyodide') 
-        ? currentShellCwd.replace('/home/pyodide', '~') 
-        : currentShellCwd;
-      if (displayCwd === '') displayCwd = '~';
       terminal.write(`\r\x1b[2K\x1b[1;34m${displayCwd}\x1b[32m$ \x1b[0m${cmd}\r\n`);
     }
+    socket.emit('output-sync', { action: 'shell_command', cwd: displayCwd, cmd: cmd });
+
     if (isHost) {
       const worker = getOrInitWorker();
       if (worker) worker.postMessage({ type: 'shell', command: cmd, currentCode: codeTextarea.value, activeFile: currentActiveFile, skipPrompt: false });
@@ -1918,7 +2378,12 @@ builtins.input = custom_input
 
   function commitInlineRename(child, newName) {
     const cleanNewName = newName.trim();
+    const oldPath = child.path;
     renamingPath = null;
+    renamingValue = '';
+    renamingCursor = null;
+    localRenaming = false;
+    socket.emit('tree-rename-end', { path: oldPath });
 
     if (!cleanNewName || cleanNewName === child.name) {
       renderFilesList();
@@ -1964,6 +2429,7 @@ builtins.input = custom_input
         currentActiveFile = cleanNewPath;
       }
       renderTabs();
+      socket.emit('code-change', { code: roomCode, cursor: null, activeFile: currentActiveFile, openTabs: openTabs });
     }
 
     renderFilesList();
@@ -1986,9 +2452,12 @@ builtins.input = custom_input
         if (codeTextarea) codeTextarea.value = '';
         roomCode = '';
         updateEditorDisplay();
+        socket.emit('code-change', { code: roomCode, cursor: null, activeFile: '', openTabs: openTabs });
       } else if (currentActiveFile === targetPath || currentActiveFile === cleanPath) {
         currentActiveFile = openTabs[openTabs.length - 1];
-        openFileInTab(currentActiveFile);
+        openFileInTab(currentActiveFile, openTabs);
+      } else {
+        socket.emit('code-change', { code: roomCode, cursor: null, activeFile: currentActiveFile, openTabs: openTabs });
       }
       renderTabs();
     }
@@ -2115,13 +2584,14 @@ builtins.input = custom_input
         tabBufferMap.set(cleanNewPath, buf);
       }
 
-      const openIdx = openTabs.findIndex(t => t === sourcePath || t === cleanSource);
+      const openIdx = openTabs.findIndex(t => t === sourcePath || t === cleanOldPath);
       if (openIdx !== -1) openTabs[openIdx] = cleanNewPath;
 
       if (currentActiveFile === sourcePath || currentActiveFile === cleanSource) {
         currentActiveFile = cleanNewPath;
       }
       renderTabs();
+      socket.emit('code-change', { code: roomCode, cursor: null, activeFile: currentActiveFile, openTabs: openTabs });
     }
   }
 
@@ -2180,34 +2650,72 @@ builtins.input = custom_input
         : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #94a3b8;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`;
 
       const placeholder = isFolder ? 'Folder name...' : 'File name...';
+      const initialVal = inlineCreatingItem.value !== undefined ? inlineCreatingItem.value : '';
 
       inlineEl.innerHTML = `
         <span style="display:inline-block; width: 12px; margin-right: 4px;"></span>
         <div style="margin-right: 6px; display: flex; align-items: center;">${iconHtml}</div>
-        <input type="text" class="inline-create-input" placeholder="${placeholder}" style="font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-card, #1e293b); color: var(--text-primary); border: 1px solid var(--accent-primary, #6366f1); border-radius: 3px; padding: 1px 4px; width: calc(100% - 20px); outline: none;" />
+        <div class="inline-input-wrapper" style="position: relative; flex: 1; display: flex; align-items: center; min-width: 0;">
+          <input type="text" class="inline-create-input" value="${escapeHtml(initialVal)}" placeholder="${placeholder}" style="font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-card, #1e293b); color: var(--text-primary); border: 1px solid var(--accent-primary, #6366f1); border-radius: 3px; padding: 1px 4px; width: 100%; outline: none;" />
+        </div>
       `;
 
       container.appendChild(inlineEl);
 
       const inputEl = inlineEl.querySelector('.inline-create-input');
       if (inputEl) {
-        setTimeout(() => {
-          inputEl.focus();
-        }, 0);
+        if (localCreating) {
+          setTimeout(() => {
+            inputEl.focus();
+            if (inputEl.value) {
+              const len = inputEl.value.length;
+              inputEl.setSelectionRange(len, len);
+            }
+          }, 0);
+        } else if (inlineCreatingItem.cursor) {
+          updateInputCursorDisplay(inputEl, inlineCreatingItem.cursor);
+        }
 
-        inputEl.addEventListener('click', (e) => e.stopPropagation());
+        const handleCursorChange = () => {
+          if (!localCreating) return;
+          const cursor = { start: inputEl.selectionStart, end: inputEl.selectionEnd };
+          inlineCreatingItem.cursor = cursor;
+          socket.emit('tree-create-cursor', { cursor });
+        };
+
+        inputEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          handleCursorChange();
+        });
+        inputEl.addEventListener('keyup', handleCursorChange);
+        inputEl.addEventListener('mouseup', handleCursorChange);
+        inputEl.addEventListener('select', handleCursorChange);
+
+        inputEl.addEventListener('input', () => {
+          if (inlineCreatingItem) {
+            inlineCreatingItem.value = inputEl.value;
+            const cursor = { start: inputEl.selectionStart, end: inputEl.selectionEnd };
+            inlineCreatingItem.cursor = cursor;
+            socket.emit('tree-create-input', { value: inputEl.value, cursor });
+          }
+        });
+
         inputEl.addEventListener('keydown', (e) => {
           e.stopPropagation();
           if (e.key === 'Enter') {
             commitInlineCreate(inputEl.value);
           } else if (e.key === 'Escape') {
             inlineCreatingItem = null;
+            localCreating = false;
+            socket.emit('tree-create-end');
             renderFilesList();
           }
         });
 
         inputEl.addEventListener('blur', () => {
-          commitInlineCreate(inputEl.value);
+          if (localCreating && inlineCreatingItem) {
+            commitInlineCreate(inputEl.value);
+          }
         });
       }
     }
@@ -2218,19 +2726,29 @@ builtins.input = custom_input
       return a.name.localeCompare(b.name);
     });
 
-      sortedChildren.forEach(child => {
-        const isRenaming = renamingPath === child.path;
-        const el = document.createElement('div');
-        el.className = 'user-item';
-        el.draggable = !isRenaming;
-        el.style.cursor = isRenaming ? 'default' : 'pointer';
-        el.style.marginBottom = '2px';
-        el.style.display = 'flex';
-        el.style.alignItems = 'center';
-        el.style.padding = '4px 8px';
-        el.style.paddingLeft = `${depth * 14 + 8}px`;
-        el.style.borderRadius = '4px';
-        el.style.userSelect = isRenaming ? 'text' : 'none';
+    sortedChildren.forEach(child => {
+      const isRenaming = renamingPath === child.path;
+      const el = document.createElement('div');
+      el.dataset.path = child.path;
+      el.className = 'user-item';
+      if (syncedHoveredTreePath === child.path) {
+        el.classList.add('is-hovered');
+      }
+      if (syncedDraggingPath === child.path) {
+        el.classList.add('is-dragging');
+      }
+      if (syncedDragOverPath === child.path) {
+        el.classList.add('drag-folder-over');
+      }
+      el.draggable = !isRenaming;
+      el.style.cursor = isRenaming ? 'default' : 'pointer';
+      el.style.marginBottom = '2px';
+      el.style.display = 'flex';
+      el.style.alignItems = 'center';
+      el.style.padding = '4px 8px';
+      el.style.paddingLeft = `${depth * 14 + 8}px`;
+      el.style.borderRadius = '4px';
+      el.style.userSelect = isRenaming ? 'text' : 'none';
 
       const isSelectedFolder = child.isFolder && selectedFolder === child.path;
       const isActiveFile = !child.isFolder && !selectedFolder && (child.path === currentActiveFile || child.name === currentActiveFile);
@@ -2258,7 +2776,12 @@ builtins.input = custom_input
       const isItemUnsaved = !child.isFolder && unsavedFiles.has(child.path);
       const unsavedDotHtml = isItemUnsaved ? '<span class="unsaved-dot" title="Unsaved changes" style="margin-left: 4px; color: var(--accent-amber, #f59e0b); font-size: 1.1rem; line-height: 1;">•</span>' : '';
       if (isRenaming) {
-        nameContentHtml = `<input type="text" class="inline-rename-input" value="${child.name}" style="font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-card, #1e293b); color: var(--text-primary); border: 1px solid var(--accent-primary, #6366f1); border-radius: 3px; padding: 1px 4px; width: calc(100% - 20px); outline: none; user-select: text !important; -webkit-user-select: text !important; cursor: text;" />`;
+        const displayVal = renamingValue !== undefined && renamingValue !== null && renamingValue !== '' ? renamingValue : child.name;
+        nameContentHtml = `
+          <div class="inline-input-wrapper" style="position: relative; flex: 1; display: flex; align-items: center; min-width: 0;">
+            <input type="text" class="inline-rename-input" value="${escapeHtml(displayVal)}" style="font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-card, #1e293b); color: var(--text-primary); border: 1px solid var(--accent-primary, #6366f1); border-radius: 3px; padding: 1px 4px; width: 100%; outline: none; user-select: text !important; -webkit-user-select: text !important; cursor: text;" />
+          </div>
+        `;
       } else {
         nameContentHtml = `<div class="tree-node-name" style="font-family: var(--font-mono); font-size: 0.85rem; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: ${child.isFolder ? 'var(--text-primary)' : 'var(--text-muted)'}; display: flex; align-items: center;"><span>${child.name}</span>${unsavedDotHtml}</div>`;
       }
@@ -2271,7 +2794,7 @@ builtins.input = custom_input
         ${nameContentHtml}
         <div class="tree-item-actions" style="display: ${isRenaming ? 'none' : 'none'}; gap: 4px; align-items: center; margin-left: 4px;">
           <button class="tree-action-btn rename-btn" title="Rename">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
           </button>
           <button class="tree-action-btn delete-btn" title="Delete">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
@@ -2279,18 +2802,58 @@ builtins.input = custom_input
         </div>
       `;
 
+      // Live tree hover sync
+      el.addEventListener('mouseenter', () => {
+        syncedHoveredTreePath = child.path;
+        socket.emit('tree-hover', { path: child.path, isHovered: true });
+      });
+      el.addEventListener('mouseleave', () => {
+        if (syncedHoveredTreePath === child.path) syncedHoveredTreePath = null;
+        socket.emit('tree-hover', { path: child.path, isHovered: false });
+      });
+
       if (isRenaming) {
         const inputEl = el.querySelector('.inline-rename-input');
         if (inputEl) {
           inputEl.setAttribute('draggable', 'false');
-          setTimeout(() => {
-            inputEl.focus();
-          }, 0);
+          if (localRenaming) {
+            setTimeout(() => {
+              inputEl.focus();
+              if (inputEl.value) {
+                const len = inputEl.value.length;
+                inputEl.setSelectionRange(len, len);
+              }
+            }, 0);
+          } else if (renamingCursor) {
+            updateInputCursorDisplay(inputEl, renamingCursor);
+          }
 
-          inputEl.addEventListener('click', (e) => e.stopPropagation());
+          const handleRenameCursor = () => {
+            if (!localRenaming) return;
+            const cursor = { start: inputEl.selectionStart, end: inputEl.selectionEnd };
+            renamingCursor = cursor;
+            socket.emit('tree-rename-cursor', { path: child.path, cursor });
+          };
+
+          inputEl.addEventListener('click', (e) => {
+            e.stopPropagation();
+            handleRenameCursor();
+          });
           inputEl.addEventListener('mousedown', (e) => e.stopPropagation());
-          inputEl.addEventListener('mouseup', (e) => e.stopPropagation());
+          inputEl.addEventListener('mouseup', (e) => {
+            e.stopPropagation();
+            handleRenameCursor();
+          });
           inputEl.addEventListener('dblclick', (e) => e.stopPropagation());
+          inputEl.addEventListener('keyup', handleRenameCursor);
+          inputEl.addEventListener('select', handleRenameCursor);
+
+          inputEl.addEventListener('input', () => {
+            renamingValue = inputEl.value;
+            const cursor = { start: inputEl.selectionStart, end: inputEl.selectionEnd };
+            renamingCursor = cursor;
+            socket.emit('tree-rename-input', { path: child.path, value: inputEl.value, cursor });
+          });
 
           inputEl.addEventListener('keydown', (e) => {
             e.stopPropagation();
@@ -2298,12 +2861,18 @@ builtins.input = custom_input
               commitInlineRename(child, inputEl.value);
             } else if (e.key === 'Escape') {
               renamingPath = null;
+              renamingValue = '';
+              renamingCursor = null;
+              localRenaming = false;
+              socket.emit('tree-rename-end', { path: child.path });
               renderFilesList();
             }
           });
 
           inputEl.addEventListener('blur', () => {
-            commitInlineRename(child, inputEl.value);
+            if (localRenaming && renamingPath === child.path) {
+              commitInlineRename(child, inputEl.value);
+            }
           });
         }
       }
@@ -2315,6 +2884,9 @@ builtins.input = custom_input
           return;
         }
         e.stopPropagation();
+        el.classList.add('is-dragging');
+        syncedDraggingPath = child.path;
+        socket.emit('tree-drag-start', { path: child.path });
         e.dataTransfer.setData('text/plain', child.path);
 
         const dragGhost = document.createElement('div');
@@ -2345,6 +2917,12 @@ builtins.input = custom_input
         }, 0);
       });
 
+      el.addEventListener('dragend', () => {
+        el.classList.remove('is-dragging');
+        syncedDraggingPath = null;
+        socket.emit('tree-drag-end');
+      });
+
       el.addEventListener('dragover', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -2352,20 +2930,24 @@ builtins.input = custom_input
         if (child.isFolder) {
           if (fileListContainer) fileListContainer.classList.remove('root-drag-over');
           el.classList.add('drag-folder-over');
+          socket.emit('tree-drag-over', { targetPath: child.path, isFolder: true, isRoot: false });
         } else if (fileListContainer) {
           fileListContainer.classList.add('root-drag-over');
+          socket.emit('tree-drag-over', { targetPath: null, isFolder: false, isRoot: true });
         }
       });
 
       el.addEventListener('dragleave', (e) => {
         e.stopPropagation();
         el.classList.remove('drag-folder-over');
+        socket.emit('tree-drag-leave', { targetPath: child.path, isRoot: false });
       });
 
       el.addEventListener('drop', (e) => {
         e.preventDefault();
         e.stopPropagation();
         el.classList.remove('drag-folder-over');
+        socket.emit('tree-drag-end');
         const sourcePath = e.dataTransfer.getData('text/plain');
         handleTreeDrop(sourcePath, child);
       });
@@ -2381,37 +2963,66 @@ builtins.input = custom_input
             collapsedFolders.add(child.path);
           }
           renderFilesList();
+          emitSidebarState();
+          socket.emit('tree-select', { path: selectedFolder });
         } else {
           selectedFolder = '';
           openFileInTab(child.path);
           renderFilesList();
+          socket.emit('tree-select', { path: '' });
         }
       });
 
-      // Action button click listeners
+      // Action button click & hover listeners
       const renameBtn = el.querySelector('.rename-btn');
       const deleteBtn = el.querySelector('.delete-btn');
       const nameEl = el.querySelector('.tree-node-name');
 
+      if (syncedHoveredTreeAction && syncedHoveredTreeAction.path === child.path) {
+        if (syncedHoveredTreeAction.action === 'rename' && renameBtn) renameBtn.classList.add('is-hovered');
+        if (syncedHoveredTreeAction.action === 'delete' && deleteBtn) deleteBtn.classList.add('is-hovered');
+      }
+
       if (nameEl) {
         nameEl.addEventListener('dblclick', (e) => {
           e.stopPropagation();
+          localRenaming = true;
           renamingPath = child.path;
+          renamingValue = child.name;
+          renamingCursor = { start: child.name.length, end: child.name.length };
           renderFilesList();
+          socket.emit('tree-rename-start', { path: child.path, initialName: child.name, cursor: renamingCursor });
         });
       }
 
       if (renameBtn) {
+        renameBtn.addEventListener('mouseenter', () => {
+          socket.emit('tree-action-hover', { path: child.path, action: 'rename', isHovered: true });
+        });
+        renameBtn.addEventListener('mouseleave', () => {
+          socket.emit('tree-action-hover', { path: child.path, action: 'rename', isHovered: false });
+        });
         renameBtn.addEventListener('click', (e) => {
           e.stopPropagation();
+          localRenaming = true;
           renamingPath = child.path;
+          renamingValue = child.name;
+          renamingCursor = { start: child.name.length, end: child.name.length };
           renderFilesList();
+          socket.emit('tree-rename-start', { path: child.path, initialName: child.name, cursor: renamingCursor });
         });
       }
 
       if (deleteBtn) {
+        deleteBtn.addEventListener('mouseenter', () => {
+          socket.emit('tree-action-hover', { path: child.path, action: 'delete', isHovered: true });
+        });
+        deleteBtn.addEventListener('mouseleave', () => {
+          socket.emit('tree-action-hover', { path: child.path, action: 'delete', isHovered: false });
+        });
         deleteBtn.addEventListener('click', (e) => {
           e.stopPropagation();
+          socket.emit('tree-action-hover', { path: child.path, action: 'delete', isHovered: false });
           deleteTreeItem(child.path, child.isFolder);
         });
       }
@@ -2431,21 +3042,27 @@ builtins.input = custom_input
     const fileListContainer = document.getElementById('fileListContainer');
     if (!fileListContainer) return;
     fileListContainer.innerHTML = '';
+    if (syncedRootDragOver) {
+      fileListContainer.classList.add('root-drag-over');
+    }
 
     if (!isContainerDragInit) {
       isContainerDragInit = true;
       fileListContainer.addEventListener('dragover', (e) => {
         e.preventDefault();
         fileListContainer.classList.add('root-drag-over');
+        socket.emit('tree-drag-over', { targetPath: null, isFolder: false, isRoot: true });
       });
       fileListContainer.addEventListener('dragleave', (e) => {
         if (e.target === fileListContainer) {
           fileListContainer.classList.remove('root-drag-over');
+          socket.emit('tree-drag-leave', { targetPath: null, isRoot: true });
         }
       });
       fileListContainer.addEventListener('drop', (e) => {
         e.preventDefault();
         fileListContainer.classList.remove('root-drag-over');
+        socket.emit('tree-drag-end');
         const sourcePath = e.dataTransfer.getData('text/plain');
         if (sourcePath) {
           handleTreeDrop(sourcePath, null);
@@ -2457,6 +3074,7 @@ builtins.input = custom_input
           if (selectedFolder) {
             selectedFolder = '';
             renderFilesList();
+            socket.emit('tree-select', { path: '' });
           }
         }
       };
@@ -2469,6 +3087,7 @@ builtins.input = custom_input
           if (selectedFolder) {
             selectedFolder = '';
             renderFilesList();
+            socket.emit('tree-select', { path: '' });
           }
         }
       });
@@ -2587,6 +3206,11 @@ builtins.input = custom_input
             shellHistory.push(text);
             shellHistoryIndex = -1;
           }
+          let displayCwd = currentShellCwd.startsWith('/home/pyodide') 
+            ? currentShellCwd.replace('/home/pyodide', '~') 
+            : currentShellCwd;
+          if (displayCwd === '') displayCwd = '~';
+          socket.emit('output-sync', { action: 'shell_command', cwd: displayCwd, cmd: text });
           socket.emit('output-sync', { action: 'input_resolved', text: text });
           if (isHost) {
             const worker = getOrInitWorker();
@@ -2797,6 +3421,14 @@ builtins.input = custom_input
   const sidebarExpandBtn = document.getElementById('sidebarExpandBtn');
   const workspaceContainer = document.querySelector('.workspace');
 
+  function emitSidebarState() {
+    const isCollapsed = sidebar ? sidebar.classList.contains('collapsed') : false;
+    socket.emit('sidebar-toggle', {
+      collapsed: isCollapsed,
+      collapsedFolders: Array.from(collapsedFolders)
+    });
+  }
+
   function updateSidebarToggleState() {
     const isCollapsed = sidebar.classList.contains('collapsed');
     if (workspaceContainer) {
@@ -2831,6 +3463,7 @@ builtins.input = custom_input
     sidebarCollapseBtn.addEventListener('click', () => {
       sidebar.classList.add('collapsed');
       updateSidebarToggleState();
+      emitSidebarState();
     });
   }
 
@@ -2838,6 +3471,7 @@ builtins.input = custom_input
     sidebarExpandBtn.addEventListener('click', () => {
       sidebar.classList.remove('collapsed');
       updateSidebarToggleState();
+      emitSidebarState();
     });
   }
 
@@ -2845,6 +3479,7 @@ builtins.input = custom_input
     toggleFilesBtn.addEventListener('click', () => {
       sidebar.classList.toggle('collapsed');
       updateSidebarToggleState();
+      emitSidebarState();
     });
   }
 
@@ -2852,6 +3487,7 @@ builtins.input = custom_input
     toggleUsersBtn.addEventListener('click', () => {
       sidebar.classList.toggle('collapsed');
       updateSidebarToggleState();
+      emitSidebarState();
     });
   }
 
@@ -2907,7 +3543,7 @@ builtins.input = custom_input
   }
 
   // Automatically hide sidebars on small screens
-  const mql = window.matchMedia('(max-width: 1250px)');
+  const mql = window.matchMedia('(max-width: 768px)');
   function handleScreenChange(e) {
     if (e.matches) {
       if (sidebar) sidebar.classList.add('collapsed');

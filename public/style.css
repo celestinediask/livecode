@@ -7,6 +7,7 @@
   --bg-surface: #161922;
   --bg-card: #1e2230;
   --bg-editor: #12151e;
+  --bg-hover: rgba(255, 255, 255, 0.08);
   --border-color: #2a2e3d;
   --border-focus: #8b5cf6;
 
@@ -273,16 +274,29 @@ body {
   100% { transform: scale(0.95); opacity: 0.8; }
 }
 
+.room-text-wrapper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+}
+
 .room-label {
   color: var(--text-muted);
   font-size: 0.75rem;
   font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.room-label::after {
+  content: ":";
 }
 
 .room-id {
   font-family: var(--font-mono);
   font-weight: 700;
   color: var(--accent-cyan);
+  white-space: nowrap;
 }
 
 /* Protection Panel Controls */
@@ -431,7 +445,8 @@ body {
   color: var(--text-primary);
   border: 1px solid var(--border-color);
 }
-.btn-secondary:hover {
+.btn-secondary:hover,
+.btn-secondary.is-hovered {
   background: var(--border-color);
 }
 
@@ -714,11 +729,13 @@ body {
   transition: background-color 0.15s ease;
 }
 
-.user-item:hover {
-  background-color: var(--bg-hover, rgba(255, 255, 255, 0.08));
+.user-item:hover,
+.user-item.is-hovered {
+  background-color: var(--bg-hover, rgba(255, 255, 255, 0.08)) !important;
 }
 
-.user-item:hover .tree-item-actions {
+.user-item:hover .tree-item-actions,
+.user-item.is-hovered .tree-item-actions {
   display: flex !important;
 }
 
@@ -737,15 +754,22 @@ body {
   justify-content: center;
 }
 
-.tree-action-btn:hover {
+.tree-action-btn:hover,
+.tree-action-btn.is-hovered {
   opacity: 1;
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.15);
 }
 
-.tree-action-btn.delete-btn:hover {
+.tree-action-btn.delete-btn:hover,
+.tree-action-btn.delete-btn.is-hovered {
   color: var(--accent-rose, #ef4444);
   background: rgba(239, 68, 68, 0.2);
+}
+
+.user-item.is-dragging {
+  opacity: 0.45 !important;
+  background-color: rgba(99, 102, 241, 0.1) !important;
 }
 
 .user-item.drag-folder-over {
@@ -757,6 +781,33 @@ body {
   outline: 2px dashed var(--accent-primary, #6366f1) !important;
   background-color: rgba(99, 102, 241, 0.15) !important;
   border-radius: 6px;
+}
+
+.remote-input-caret {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background-color: var(--accent-primary, #6366f1);
+  border-radius: 1px;
+  animation: caretBlink 1s infinite;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.remote-input-selection {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  background-color: rgba(99, 102, 241, 0.35);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 9;
+}
+
+@keyframes caretBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 
 /* Editor Main Section */
@@ -849,8 +900,10 @@ body {
   flex-shrink: 0;
 }
 
-.editor-tab:hover {
-  background-color: var(--bg-hover);
+.editor-tab:hover,
+.editor-tab.is-hovered {
+  background-color: var(--bg-hover, rgba(255, 255, 255, 0.08));
+  color: var(--text-primary);
 }
 
 .editor-tab.active {
@@ -878,7 +931,8 @@ body {
   opacity: 0.7;
 }
 
-.editor-tab-close:hover {
+.editor-tab-close:hover,
+.editor-tab-close.is-hovered {
   background-color: rgba(255, 255, 255, 0.1);
   color: var(--text-primary);
   opacity: 1;
@@ -1563,7 +1617,16 @@ body.read-only-mode #codeTextarea {
 /* ==========================================================================
    Responsive & Mobile Layout
    ========================================================================== */
-@media (max-width: 1250px) {
+@media (max-width: 1024px) {
+  .room-id {
+    display: none !important;
+  }
+  .room-label::after {
+    content: "" !important;
+  }
+}
+
+@media (max-width: 768px) {
   .app-header {
     gap: 0.5rem;
     padding: 0 0.5rem;
@@ -1573,46 +1636,11 @@ body.read-only-mode #codeTextarea {
     justify-content: flex-end;
   }
   
-  .workspace {
-    flex-direction: column;
-  }
-
-  .editor-tabs {
-    padding-left: 48px;
-    padding-right: 32px;
+  .room-id {
+    display: none !important;
   }
   
-  .sidebar, .chat-drawer {
-    position: absolute;
-    height: 100%;
-    width: 100%;
-    max-width: 320px;
-    box-shadow: 0 0 20px rgba(0,0,0,0.5);
-  }
-
-  .sidebar {
-    z-index: 120;
-  }
-
-  .chat-drawer {
-    z-index: 100;
-  }
-
-  .sidebar.collapsed {
-    transform: translateX(-100%);
-    margin-left: 0;
-  }
-
-  .chat-drawer {
-    right: 0;
-  }
-  
-  .chat-drawer.collapsed {
-    transform: translateX(100%);
-    margin-right: 0;
-  }
-  
-  .room-text-wrapper {
-    display: none;
+  .room-label::after {
+    content: "" !important;
   }
 }
