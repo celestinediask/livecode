@@ -1093,6 +1093,40 @@ body {
   opacity: 1;
 }
 
+.editor-tab-new {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  align-self: center;
+  margin: 0 4px;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  color: var(--text-muted, #94a3b8);
+  cursor: pointer;
+  border-radius: 4px;
+  flex-shrink: 0;
+  padding: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.editor-tab-new:hover,
+.editor-tab-new:focus-visible {
+  color: var(--text-primary, #f3f4f6);
+  background: rgba(255, 255, 255, 0.08) !important;
+  outline: none !important;
+}
+
+.editor-tab-new:active {
+  background: rgba(255, 255, 255, 0.12) !important;
+}
+
 /* Editor Wrapper */
 .editor-wrapper {
   flex: 1;

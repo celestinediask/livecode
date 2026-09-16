@@ -71,6 +71,8 @@ function getOrCreateRoom(roomId) {
       files: [],
       cwd: '/home/pyodide',
       sidebarCollapsed: false,
+      chatDrawerCollapsed: false,
+      activeDrawerTab: 'chat',
       collapsedFolders: [],
       selectedFolder: '',
       hostSocketId: null,
@@ -236,6 +238,8 @@ io.on('connection', (socket) => {
       files: room.files || [],
       cwd: room.cwd || '/home/pyodide',
       sidebarCollapsed: room.sidebarCollapsed ?? false,
+      chatDrawerCollapsed: room.chatDrawerCollapsed ?? false,
+      activeDrawerTab: room.activeDrawerTab || 'chat',
       collapsedFolders: room.collapsedFolders || [],
       selectedFolder: room.selectedFolder || '',
       settings: room.settings,
@@ -329,6 +333,24 @@ io.on('connection', (socket) => {
     socket.to(currentRoomId).emit('sidebar-update', {
       collapsed: room.sidebarCollapsed,
       collapsedFolders: room.collapsedFolders
+    });
+  });
+
+  socket.on('chat-drawer-toggle', ({ collapsed }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (collapsed !== undefined) room.chatDrawerCollapsed = collapsed;
+    socket.to(currentRoomId).emit('chat-drawer-update', {
+      collapsed: room.chatDrawerCollapsed
+    });
+  });
+
+  socket.on('drawer-tab-switch', ({ tab }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    if (tab) room.activeDrawerTab = tab;
+    socket.to(currentRoomId).emit('drawer-tab-update', {
+      tab: room.activeDrawerTab
     });
   });
 
@@ -522,11 +544,12 @@ io.on('connection', (socket) => {
   });
 
   // Real-time output scrolling sync
-  socket.on('output-scroll-sync', ({ top }) => {
+  socket.on('output-scroll-sync', ({ top, line }) => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
     socket.to(currentRoomId).emit('output-scroll-update', {
       userId: socket.id,
-      top: top
+      top: top,
+      line: line
     });
   });
 

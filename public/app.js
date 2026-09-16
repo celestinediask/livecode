@@ -194,6 +194,17 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       updateSidebarToggleState();
     }
+    if (state.chatDrawerCollapsed !== undefined && chatDrawer) {
+      if (state.chatDrawerCollapsed) {
+        chatDrawer.classList.add('collapsed');
+      } else {
+        chatDrawer.classList.remove('collapsed');
+      }
+      updateChatDrawerToggleState();
+    }
+    if (state.activeDrawerTab) {
+      switchDrawerTab(state.activeDrawerTab, false);
+    }
     if (state.collapsedFolders && Array.isArray(state.collapsedFolders)) {
       collapsedFolders.clear();
       state.collapsedFolders.forEach(f => collapsedFolders.add(f));
@@ -668,6 +679,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  socket.on('chat-drawer-update', ({ collapsed }) => {
+    if (collapsed !== undefined && chatDrawer) {
+      if (collapsed) {
+        chatDrawer.classList.add('collapsed');
+      } else {
+        chatDrawer.classList.remove('collapsed');
+      }
+      updateChatDrawerToggleState();
+    }
+  });
+
+  socket.on('drawer-tab-update', ({ tab }) => {
+    if (tab) {
+      switchDrawerTab(tab, false);
+    }
+  });
+
   socket.on('cursor-update', ({ userId, cursor }) => {
     if (userId === socket.id) return;
     const user = usersList.find(u => u.id === userId);
@@ -741,11 +769,21 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(() => { isRemoteScroll = false; }, 50);
   });
 
-  socket.on('output-scroll-update', ({ userId, top }) => {
+  socket.on('output-scroll-update', ({ userId, top, line }) => {
     if (userId === socket.id || !consoleOutput) return;
     isRemoteOutputScroll = true;
-    consoleOutput.scrollTop = top;
-    setTimeout(() => { isRemoteOutputScroll = false; }, 50);
+    if (terminal && typeof line === 'number') {
+      try {
+        terminal.scrollToLine(line);
+      } catch (e) {}
+    }
+    const viewport = consoleOutput.querySelector('.xterm-viewport');
+    if (viewport && typeof top === 'number') {
+      viewport.scrollTop = top;
+    } else if (typeof top === 'number') {
+      consoleOutput.scrollTop = top;
+    }
+    setTimeout(() => { isRemoteOutputScroll = false; }, 80);
   });
 
   socket.on('host-assigned', ({ isHost: newIsHost }) => {
@@ -1237,6 +1275,15 @@ document.addEventListener('DOMContentLoaded', () => {
     if (activeRestingCursorUserId !== socket.id) {
       activeRestingCursorUserId = socket.id;
       renderCollaboratorCursors();
+    }
+
+    // New Tab shortcut: Ctrl+Alt+N / Cmd+Alt+N, Alt+T, Alt+N, or Ctrl+Alt+T / Cmd+Alt+T
+    if ((isCmdOrCtrl && e.altKey && (key === 'n' || key === 't')) || 
+        (e.altKey && (key === 't' || key === 'n'))) {
+      e.preventDefault();
+      e.stopPropagation();
+      createNewTab();
+      return;
     }
 
     // Prevent Save (Ctrl+S / Cmd+S for all)
@@ -2523,6 +2570,41 @@ builtins.input = custom_input
     });
   }
 
+  function createNewTab() {
+    let baseName = 'Untitled';
+    let newName = 'Untitled.py';
+    let counter = 1;
+    const existing = new Set([...openTabs, ...(shellFiles || [])]);
+    while (existing.has(newName) || (counter === 1 && existing.has('Untitled'))) {
+      counter++;
+      newName = `Untitled-${counter}.py`;
+    }
+
+    if (currentActiveFile && codeTextarea) {
+      tabBufferMap.set(currentActiveFile, codeTextarea.value);
+    }
+
+    if (!openTabs.includes(newName)) {
+      openTabs.push(newName);
+    }
+    currentActiveFile = newName;
+    tabBufferMap.set(newName, '');
+    unsavedFiles.add(newName);
+    if (codeTextarea) codeTextarea.value = '';
+    roomCode = '';
+    updateEditorDisplay();
+    renderTabs();
+    renderFilesList();
+    socket.emit('code-change', { code: roomCode, cursor: null, activeFile: currentActiveFile, openTabs: openTabs });
+    if (codeTextarea) {
+      setTimeout(() => {
+        codeTextarea.focus();
+        codeTextarea.setSelectionRange(0, 0);
+      }, 50);
+    }
+    showToast(`Created new tab: ${newName}`);
+  }
+
   function openFileInTab(filename, customTabs = null) {
     if (customTabs && Array.isArray(customTabs)) {
       openTabs = [...customTabs];
@@ -2615,6 +2697,24 @@ builtins.input = custom_input
       
       tabsContainer.appendChild(tabEl);
     });
+
+    // Add New Tab '+' button
+    const newTabBtn = document.createElement('button');
+    newTabBtn.type = 'button';
+    newTabBtn.className = 'editor-tab-new';
+    newTabBtn.id = 'newTabBtn';
+    newTabBtn.title = 'New Tab (Ctrl+Alt+N / Alt+T)';
+    newTabBtn.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="12" y1="5" x2="12" y2="19"></line>
+        <line x1="5" y1="12" x2="19" y2="12"></line>
+      </svg>
+    `;
+    newTabBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      createNewTab();
+    });
+    tabsContainer.appendChild(newTabBtn);
   }
 
   let selectedFolder = '';
@@ -3509,7 +3609,10 @@ builtins.input = custom_input
     terminal.open(consoleOutput);
     
     // Slight delay to ensure DOM is fully rendered before fitting
-    setTimeout(() => { if (fitAddon) fitAddon.fit(); }, 10);
+    setTimeout(() => { 
+      if (fitAddon) fitAddon.fit(); 
+      attachTerminalScrollSync();
+    }, 10);
     
     window.addEventListener('resize', () => {
       if (fitAddon) fitAddon.fit();
@@ -3723,15 +3826,50 @@ builtins.input = custom_input
     socket.emit('output-sync', { action: 'clear', message: '[Cleared]' });
   });
 
-  // The scroll listener isn't perfectly mapped to xterm.js natively without addon-scroll, 
-  // but we can omit it or leave as is.
+  // Real-time terminal/console output scrolling synchronization
   let isRemoteOutputScroll = false;
+  let lastOutputScrollEmitTime = 0;
+
+  function attachTerminalScrollSync() {
+    if (!terminal) return;
+    try {
+      if (terminal.onScroll) {
+        terminal.onScroll((newPosition) => {
+          if (isRemoteOutputScroll) return;
+          const now = Date.now();
+          if (now - lastOutputScrollEmitTime < 25) return;
+          lastOutputScrollEmitTime = now;
+          const viewport = consoleOutput ? consoleOutput.querySelector('.xterm-viewport') : null;
+          socket.emit('output-scroll-sync', {
+            line: newPosition,
+            top: viewport ? viewport.scrollTop : 0
+          });
+        });
+      }
+    } catch (e) {}
+
+    const viewport = consoleOutput ? consoleOutput.querySelector('.xterm-viewport') : null;
+    if (viewport) {
+      viewport.addEventListener('scroll', () => {
+        if (isRemoteOutputScroll) return;
+        const now = Date.now();
+        if (now - lastOutputScrollEmitTime < 25) return;
+        lastOutputScrollEmitTime = now;
+        const line = terminal && terminal.buffer ? terminal.buffer.active.viewportY : undefined;
+        socket.emit('output-scroll-sync', {
+          line: line,
+          top: viewport.scrollTop
+        });
+      }, { passive: true });
+    }
+  }
+
   if (consoleOutput) {
     consoleOutput.addEventListener('scroll', () => {
       if (!isRemoteOutputScroll) {
         socket.emit('output-scroll-sync', { top: consoleOutput.scrollTop });
       }
-    });
+    }, { passive: true });
   }
 
   // --------------------------------------------------------------------------
@@ -3840,11 +3978,17 @@ builtins.input = custom_input
     });
   }
 
+  function emitChatDrawerState() {
+    const isCollapsed = chatDrawer ? chatDrawer.classList.contains('collapsed') : false;
+    socket.emit('chat-drawer-toggle', { collapsed: isCollapsed });
+  }
+
   // Chat Header & Nav Toggle Controls
   if (toggleChatBtn) {
     toggleChatBtn.addEventListener('click', () => {
       chatDrawer.classList.toggle('collapsed');
       updateChatDrawerToggleState();
+      emitChatDrawerState();
     });
   }
 
@@ -3853,6 +3997,7 @@ builtins.input = custom_input
     closeChatBtn.addEventListener('click', () => {
       chatDrawer.classList.add('collapsed');
       updateChatDrawerToggleState();
+      emitChatDrawerState();
     });
   }
 
@@ -3860,6 +4005,7 @@ builtins.input = custom_input
     chatDrawerExpandBtn.addEventListener('click', () => {
       chatDrawer.classList.remove('collapsed');
       updateChatDrawerToggleState();
+      emitChatDrawerState();
     });
   }
   
@@ -3941,7 +4087,7 @@ builtins.input = custom_input
   let unreadChatCount = 0;
   let unreadActivityCount = 0;
 
-  function switchDrawerTab(tab) {
+  function switchDrawerTab(tab, emit = true) {
     activeDrawerTab = tab;
     if (tab === 'chat') {
       if (drawerTabChatBtn) drawerTabChatBtn.classList.add('active');
@@ -3966,13 +4112,16 @@ builtins.input = custom_input
       }
       if (activityMessages) activityMessages.scrollTop = activityMessages.scrollHeight;
     }
+    if (emit) {
+      socket.emit('drawer-tab-switch', { tab });
+    }
   }
 
   if (drawerTabChatBtn) {
-    drawerTabChatBtn.addEventListener('click', () => switchDrawerTab('chat'));
+    drawerTabChatBtn.addEventListener('click', () => switchDrawerTab('chat', true));
   }
   if (drawerTabActivityBtn) {
-    drawerTabActivityBtn.addEventListener('click', () => switchDrawerTab('activity'));
+    drawerTabActivityBtn.addEventListener('click', () => switchDrawerTab('activity', true));
   }
 
   if (chatInput) {
