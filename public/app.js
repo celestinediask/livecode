@@ -204,8 +204,9 @@ document.addEventListener('DOMContentLoaded', () => {
     renderFilesList();
     renderTabs();
     
-    roomLanguage = state.language;
-    languageSelect.value = roomLanguage;
+    roomLanguage = state.language || 'python';
+    if (languageSelect) languageSelect.value = roomLanguage;
+    updateDropdownUI(roomLanguage);
 
     currentUser = state.currentUser;
     isHost = state.isHost;
@@ -271,7 +272,14 @@ document.addEventListener('DOMContentLoaded', () => {
           activeRestingCursorUserId = senderId;
           lastTypingTime = Date.now();
           user.cursor = cursor;
-          remoteCursors.set(senderId, { cursor: cursor, name: user.name, color: user.color, isInsideEditor: true });
+          const existing = remoteCursors.get(senderId) || {};
+          remoteCursors.set(senderId, {
+            ...existing,
+            cursor: cursor,
+            name: user.name,
+            color: user.color,
+            isInsideEditor: true
+          });
           
           if (window._remoteTypingTimer) clearTimeout(window._remoteTypingTimer);
           window._remoteTypingTimer = setTimeout(() => {
@@ -292,6 +300,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const currentIds = new Set(users.map(u => u.id));
     for (let id of remoteCursors.keys()) {
       if (!currentIds.has(id)) {
+        const rc = remoteCursors.get(id);
+        if (rc && rc.mousePointerEl) {
+          rc.mousePointerEl.remove();
+        }
         remoteCursors.delete(id);
       }
     }
@@ -662,7 +674,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (user) {
       activeRestingCursorUserId = userId;
       user.cursor = cursor;
-      remoteCursors.set(userId, { cursor: cursor, name: user.name, color: user.color, isInsideEditor: true });
+      const existing = remoteCursors.get(userId) || {};
+      remoteCursors.set(userId, {
+        ...existing,
+        cursor: cursor,
+        name: user.name,
+        color: user.color,
+        isInsideEditor: true
+      });
 
       if (cursor.selection && cursor.selection.start !== cursor.selection.end) {
         activeSelection = {
@@ -693,15 +712,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  socket.on('mouse-update', ({ userId, x, y }) => {
-    if (userId === socket.id) return;
+  socket.on('mouse-update', (data) => {
+    const { userId } = data;
+    if (!userId || userId === socket.id) return;
     const user = usersList.find(u => u.id === userId);
     if (user) {
-      const inside = isPosInsideElement(x, y, 'codeEditorArea');
       const existing = remoteCursors.get(userId) || { cursor: user.cursor, name: user.name, color: user.color };
-      existing.mouseX = x;
-      existing.mouseY = y;
-      existing.isInsideEditor = inside;
+      existing.mouseData = data;
       existing.lastMouseMove = Date.now();
       remoteCursors.set(userId, existing);
       renderCollaboratorCursors();
@@ -856,8 +873,9 @@ document.addEventListener('DOMContentLoaded', () => {
     renderFilesList();
     renderTabs();
     
-    roomLanguage = state.language;
-    languageSelect.value = roomLanguage;
+    roomLanguage = state.language || 'python';
+    if (languageSelect) languageSelect.value = roomLanguage;
+    updateDropdownUI(roomLanguage);
 
     currentUser = state.currentUser;
     isHost = state.isHost;
@@ -915,6 +933,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (htmlPreviewContainer) htmlPreviewContainer.classList.add('hidden');
 
     if (data.action === 'clear') {
+      isShellMode = false;
+      isTerminalExpectingInput = false;
+      currentTerminalInputBuffer = '';
       if (!terminal) initTerminal();
       if (terminal) {
         terminal.reset();
@@ -925,8 +946,14 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (data.action === 'append') {
       appendConsoleLine(data.type, data.text, true);
     } else if (data.action === 'status') {
+      if (data.status === 'running') {
+        isShellMode = false;
+        isTerminalExpectingInput = false;
+        currentTerminalInputBuffer = '';
+      }
       updateOutputStatus(data.status, data.text, true);
     } else if (data.action === 'input_request') {
+      isShellMode = false;
       if (!terminal) initTerminal();
       if (data.text && terminal) {
         terminal.write(`\x1b[36m${data.text}\x1b[0m`);
@@ -946,7 +973,37 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       isShellMode = true;
       showConsoleInput();
+    } else if (data.action === 'terminal_input') {
+      if (!terminal) initTerminal();
+      if (terminal) {
+        if (data.isShellMode) {
+          isShellMode = true;
+          isTerminalExpectingInput = true;
+          let displayCwd = (data.cwd || currentShellCwd || '~');
+          if (displayCwd.startsWith('/home/pyodide')) {
+            displayCwd = displayCwd.replace('/home/pyodide', '~');
+          }
+          if (displayCwd === '') displayCwd = '~';
+          const promptFormatted = `\x1b[1;34m${displayCwd}\x1b[32m$ \x1b[0m`;
+          currentTerminalInputBuffer = data.buffer !== undefined ? data.buffer : '';
+          if (data.ctrlC) {
+            terminal.write('\x1b[35m^C\x1b[0m\r\n');
+          }
+          terminal.write(`\r\x1b[2K${promptFormatted}${renderShellInput(currentTerminalInputBuffer)}`);
+        } else {
+          currentTerminalInputBuffer = data.buffer !== undefined ? data.buffer : '';
+          if (data.diff) {
+            terminal.write(data.diff);
+          } else if (data.char) {
+            terminal.write('\x1b[35m' + data.char + '\x1b[0m');
+          }
+        }
+      }
     } else if (data.action === 'input_resolved') {
+      if (terminal && !data.isShellMode) {
+        // If remote client resolved the input, write newline to advance terminal
+        terminal.write('\r\n');
+      }
       hideConsoleInput();
     }
   });
@@ -1460,11 +1517,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (isSyntaxHighlightEnabled) {
       codeTextarea.classList.remove('syntax-disabled');
-      if (window.Prism && Prism.languages.python) {
+      const prismLang = roomLanguage === 'html' ? 'markup' : (window.Prism && Prism.languages[roomLanguage] ? roomLanguage : 'python');
+      if (window.Prism && Prism.languages[prismLang]) {
         try {
-          highlightCode.innerHTML = Prism.highlight(codeContent, Prism.languages.python, 'python');
+          highlightCode.className = `language-${prismLang}`;
+          highlightCode.innerHTML = Prism.highlight(codeContent, Prism.languages[prismLang], prismLang);
         } catch (e) {
-          highlightCode.textContent = "PRISM ERROR: " + e.message + " | " + e.stack;
+          highlightCode.textContent = codeContent;
         }
       } else {
         highlightCode.textContent = codeContent;
@@ -1568,7 +1627,20 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       });
     }
-    if (mousePointerContainer) mousePointerContainer.innerHTML = '';
+    if (mousePointerContainer) {
+      if (!mousePointerContainer.hasAttribute('data-initialized')) {
+        mousePointerContainer.innerHTML = '';
+        mousePointerContainer.setAttribute('data-initialized', 'true');
+      }
+      // Clean up any orphaned pointer DOM nodes that do not belong to an active remote user
+      const existingPointerEls = mousePointerContainer.querySelectorAll('.remote-mouse-pointer');
+      existingPointerEls.forEach(pointerEl => {
+        const uId = pointerEl.dataset.userId || (pointerEl.id ? pointerEl.id.replace('remote-pointer-', '') : null);
+        if (!uId || !remoteCursors.has(uId)) {
+          pointerEl.remove();
+        }
+      });
+    }
 
     const { charWidth, lineHeight } = getMonospaceMetrics();
     const paddingTop = 12;
@@ -1611,31 +1683,108 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const isActivelyMoving = data.lastMouseMove && (Date.now() - data.lastMouseMove < 1000);
 
-      if (isActivelyMoving && data.mouseX !== undefined && data.mouseY !== undefined) {
-        const el = document.createElement('div');
-        el.className = 'remote-mouse-pointer';
-        el.style.transform = `translate3d(${data.mouseX}px, ${data.mouseY}px, 0)`;
-        
-        if (data.isInsideEditor) {
-          // Inside editor: Text I-beam cursor icon
-          el.innerHTML = `
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="${userColor}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="12" y1="4" x2="12" y2="20"></line>
-              <line x1="8" y1="4" x2="16" y2="4"></line>
-              <line x1="8" y1="20" x2="16" y2="20"></line>
-            </svg>
-            <span class="mouse-pointer-label" style="background-color: ${userColor}; padding: 1px 6px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; color: white; margin-left: 4px;">${escapeHtml(userName)}</span>
-          `;
-        } else {
-          // Outside editor: Standard arrow cursor icon
-          el.innerHTML = `
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="${userColor}" stroke="#ffffff" stroke-width="1.5">
-              <path d="M3 3l7 18 3-7 7-3L3 3z"/>
-            </svg>
-            <span class="mouse-pointer-label" style="background-color: ${userColor}; padding: 1px 6px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; color: white; margin-left: 4px;">${escapeHtml(userName)}</span>
-          `;
+      if (isActivelyMoving && data.mouseData) {
+        const m = data.mouseData;
+        let posX = null;
+        let posY = null;
+        let isInsideEditor = false;
+
+        if (m.target === 'editor') {
+          const codeEditorArea = document.getElementById('codeEditorArea');
+          if (codeEditorArea && codeTextarea) {
+            const rect = codeEditorArea.getBoundingClientRect();
+
+            if (m.offsetX !== undefined && m.offsetY !== undefined) {
+              posX = rect.left + m.offsetX - codeTextarea.scrollLeft;
+              posY = rect.top + m.offsetY - codeTextarea.scrollTop;
+            } else if (m.line !== undefined && m.col !== undefined) {
+              posX = rect.left + (m.col - 1) * charWidth + paddingLeft - codeTextarea.scrollLeft;
+              posY = rect.top + (m.line - 1) * lineHeight + paddingTop - codeTextarea.scrollTop;
+            }
+
+            // Only display if within current visible bounds of local editor
+            if (posX !== null && posY !== null) {
+              if (posX >= rect.left - 10 && posX <= rect.right && posY >= rect.top - 10 && posY <= rect.bottom) {
+                isInsideEditor = true;
+              } else {
+                // Scrolled out of view or occluded
+                posX = null;
+                posY = null;
+              }
+            }
+          }
+        } else if (m.target === 'output') {
+          const outputDrawer = document.getElementById('outputDrawer');
+          if (outputDrawer && !outputDrawer.classList.contains('collapsed')) {
+            const rect = outputDrawer.getBoundingClientRect();
+            posX = rect.left + (m.relX || 0) * rect.width;
+            posY = rect.top + (m.relY || 0) * rect.height;
+          }
+        } else if (m.target === 'sidebar') {
+          const sidebar = document.getElementById('sidebar');
+          if (sidebar && !sidebar.classList.contains('collapsed')) {
+            const rect = sidebar.getBoundingClientRect();
+            posX = rect.left + (m.relX || 0);
+            posY = rect.top + (m.relY || 0);
+          }
+        } else if (m.target === 'header') {
+          const header = document.querySelector('.app-header');
+          if (header) {
+            const rect = header.getBoundingClientRect();
+            posX = rect.left + (m.relX || 0);
+            posY = rect.top + (m.relY || 0);
+          }
+        } else if (m.target === 'viewport') {
+          posX = (m.relX !== undefined ? m.relX : (m.x ? m.x / window.innerWidth : 0)) * window.innerWidth;
+          posY = (m.relY !== undefined ? m.relY : (m.y ? m.y / window.innerHeight : 0)) * window.innerHeight;
+        } else if (m.x !== undefined && m.y !== undefined) {
+          posX = m.x;
+          posY = m.y;
         }
-        mousePointerContainer.appendChild(el);
+
+        if (posX !== null && posY !== null) {
+          let el = data.mousePointerEl || document.getElementById('remote-pointer-' + userId);
+          if (!el) {
+            el = document.createElement('div');
+            el.id = 'remote-pointer-' + userId;
+            el.dataset.userId = userId;
+            el.className = 'remote-mouse-pointer';
+            mousePointerContainer.appendChild(el);
+            data.mousePointerMode = null; // Forces initial render
+          }
+          data.mousePointerEl = el;
+
+          el.style.transform = `translate3d(${posX}px, ${posY}px, 0)`;
+          
+          if (data.mousePointerMode !== isInsideEditor) {
+            data.mousePointerMode = isInsideEditor;
+            if (isInsideEditor) {
+              // Inside editor: Text I-beam cursor icon aligned to code
+              el.innerHTML = `
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="${userColor}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="12" y1="4" x2="12" y2="20"></line>
+                  <line x1="8" y1="4" x2="16" y2="4"></line>
+                  <line x1="8" y1="20" x2="16" y2="20"></line>
+                </svg>
+                <span class="mouse-pointer-label" style="background-color: ${userColor}; padding: 1px 6px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; color: white; margin-left: 4px;">${escapeHtml(userName)}</span>
+              `;
+            } else {
+              // Outside editor: Standard arrow cursor icon
+              el.innerHTML = `
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="${userColor}" stroke="#ffffff" stroke-width="1.5">
+                  <path d="M3 3l7 18 3-7 7-3L3 3z"/>
+                </svg>
+                <span class="mouse-pointer-label" style="background-color: ${userColor}; padding: 1px 6px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; color: white; margin-left: 4px;">${escapeHtml(userName)}</span>
+              `;
+            }
+          }
+        } else if (data.mousePointerEl) {
+          data.mousePointerEl.remove();
+          data.mousePointerEl = null;
+        }
+      } else if (data.mousePointerEl) {
+        data.mousePointerEl.remove();
+        data.mousePointerEl = null;
       }
       
       // RESTING CURSOR at specific line/column (ONLY for the LAST active cursor)
@@ -1664,50 +1813,191 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
 
-  // Real-Time Floating Mouse Pointers Tracking
+  // Real-Time Floating Mouse Pointers Tracking with Contextual Coordinate Mapping
   let lastMouseMoveTime = 0;
   window.addEventListener('mousemove', (e) => {
     const now = Date.now();
-    if (now - lastMouseMoveTime > 30) {
-      lastMouseMoveTime = now;
-      socket.emit('mouse-move', { x: e.clientX, y: e.clientY });
+    if (now - lastMouseMoveTime < 30) return;
+    lastMouseMoveTime = now;
+
+    const codeEditorArea = document.getElementById('codeEditorArea');
+    const outputDrawer = document.getElementById('outputDrawer');
+    const sidebar = document.getElementById('sidebar');
+    const header = document.querySelector('.app-header');
+
+    let payload = null;
+
+    // 1. Check if inside code editor area
+    if (codeEditorArea && codeTextarea) {
+      const rect = codeEditorArea.getBoundingClientRect();
+      if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+        const { charWidth, lineHeight } = getMonospaceMetrics();
+        const paddingTop = 12;
+        const paddingLeft = 12;
+
+        const offsetX = e.clientX - rect.left + codeTextarea.scrollLeft;
+        const offsetY = e.clientY - rect.top + codeTextarea.scrollTop;
+
+        const line = Math.max(1, Math.floor((offsetY - paddingTop) / lineHeight) + 1);
+        const col = Math.max(1, Math.floor((offsetX - paddingLeft) / charWidth) + 1);
+
+        payload = {
+          target: 'editor',
+          line: line,
+          col: col,
+          offsetX: offsetX,
+          offsetY: offsetY
+        };
+      }
+    }
+
+    // 2. Check if inside output / console drawer
+    if (!payload && outputDrawer && !outputDrawer.classList.contains('collapsed')) {
+      const rect = outputDrawer.getBoundingClientRect();
+      if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+        payload = {
+          target: 'output',
+          relX: (e.clientX - rect.left) / (rect.width || 1),
+          relY: (e.clientY - rect.top) / (rect.height || 1)
+        };
+      }
+    }
+
+    // 3. Check if inside sidebar
+    if (!payload && sidebar && !sidebar.classList.contains('collapsed')) {
+      const rect = sidebar.getBoundingClientRect();
+      if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+        payload = {
+          target: 'sidebar',
+          relX: e.clientX - rect.left,
+          relY: e.clientY - rect.top
+        };
+      }
+    }
+
+    // 4. Check if inside header
+    if (!payload && header) {
+      const rect = header.getBoundingClientRect();
+      if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+        payload = {
+          target: 'header',
+          relX: e.clientX - rect.left,
+          relY: e.clientY - rect.top
+        };
+      }
+    }
+
+    // 5. Fallback: viewport relative
+    if (!payload) {
+      payload = {
+        target: 'viewport',
+        relX: e.clientX / window.innerWidth,
+        relY: e.clientY / window.innerHeight
+      };
+    }
+
+    socket.emit('mouse-move', payload);
+  });
+
+  // Custom Language Dropdown Logic & Live Sync
+  const languageDropdownBtn = document.getElementById('languageDropdownBtn');
+  const languageDropdownMenu = document.getElementById('languageDropdownMenu');
+  const languageSelectedLabel = document.getElementById('languageSelectedLabel');
+
+  function updateDropdownUI(lang) {
+    if (languageSelectedLabel) {
+      const displayMap = { python: 'Python 3' };
+      languageSelectedLabel.textContent = displayMap[lang] || lang;
+    }
+    if (languageDropdownMenu) {
+      const items = languageDropdownMenu.querySelectorAll('.dropdown-item');
+      items.forEach(item => {
+        if (item.dataset.value === lang) {
+          item.classList.add('selected');
+        } else {
+          item.classList.remove('selected');
+        }
+      });
+    }
+  }
+
+  function setLanguageDropdownOpen(open, emit = true) {
+    if (!languageDropdownMenu || !languageDropdownBtn) return;
+    if (open) {
+      languageDropdownMenu.classList.remove('hidden');
+      languageDropdownBtn.classList.add('is-open');
+    } else {
+      languageDropdownMenu.classList.add('hidden');
+      languageDropdownBtn.classList.remove('is-open');
+    }
+    if (emit) {
+      socket.emit('language-dropdown-toggle', { isOpen: open });
+    }
+  }
+
+  if (languageDropdownBtn) {
+    languageDropdownBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isOpen = !languageDropdownMenu.classList.contains('hidden');
+      setLanguageDropdownOpen(!isOpen, true);
+    });
+  }
+
+  if (languageDropdownMenu) {
+    languageDropdownMenu.addEventListener('click', (e) => {
+      const item = e.target.closest('.dropdown-item');
+      if (!item) return;
+      const val = item.dataset.value;
+      if (val) {
+        if (roomLanguage === val) {
+          setLanguageDropdownOpen(false, true);
+          return;
+        }
+        roomLanguage = val;
+        if (languageSelect) languageSelect.value = val;
+        updateDropdownUI(val);
+        updateEditorDisplay();
+        socket.emit('language-change', { language: val });
+        setLanguageDropdownOpen(false, true);
+      }
+    });
+
+    languageDropdownMenu.querySelectorAll('.dropdown-item').forEach(item => {
+      item.addEventListener('mouseenter', () => {
+        socket.emit('language-dropdown-item-hover', { value: item.dataset.value, isHovered: true });
+      });
+      item.addEventListener('mouseleave', () => {
+        socket.emit('language-dropdown-item-hover', { value: item.dataset.value, isHovered: false });
+      });
+    });
+  }
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#languageSelectWrapper') && languageDropdownMenu && !languageDropdownMenu.classList.contains('hidden')) {
+      setLanguageDropdownOpen(false, true);
     }
   });
 
-  function updateRemoteMousePointer(userId, x, y, name, color) {
-    if (!mousePointerContainer) return;
+  socket.on('language-dropdown-update', ({ isOpen }) => {
+    setLanguageDropdownOpen(isOpen, false);
+  });
 
-    let pointerData = remoteMousePointers.get(userId);
-    if (!pointerData) {
-      const el = document.createElement('div');
-      el.className = 'remote-mouse-pointer';
-      el.innerHTML = `
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="${color}" stroke="#ffffff" stroke-width="1.5">
-          <path d="M3 3l7 18 3-7 7-3L3 3z"/>
-        </svg>
-        <div class="mouse-pointer-label" style="background-color: ${color};">${escapeHtml(name)}</div>
-      `;
-      mousePointerContainer.appendChild(el);
-      pointerData = { element: el, timeout: null };
-      remoteMousePointers.set(userId, pointerData);
+  socket.on('language-dropdown-item-hover-update', ({ value, isHovered }) => {
+    if (!languageDropdownMenu) return;
+    const item = languageDropdownMenu.querySelector(`.dropdown-item[data-value="${value}"]`);
+    if (item) {
+      if (isHovered) item.classList.add('is-hovered');
+      else item.classList.remove('is-hovered');
     }
+  });
 
-    pointerData.element.style.transform = `translate3d(${x}px, ${y}px, 0)`;
-    pointerData.element.style.opacity = '1';
-
-    if (pointerData.timeout) clearTimeout(pointerData.timeout);
-    pointerData.timeout = setTimeout(() => {
-      if (pointerData.element) {
-        pointerData.element.style.opacity = '0';
-      }
-    }, 3000);
-  }
-
-  // Language Change Listener
-  languageSelect.addEventListener('change', () => {
-    roomLanguage = 'python';
-    updateEditorDisplay();
-    socket.emit('language-change', { language: roomLanguage });
+  socket.on('language-update', ({ language }) => {
+    if (language) {
+      roomLanguage = language;
+      if (languageSelect) languageSelect.value = language;
+      updateDropdownUI(language);
+      updateEditorDisplay();
+    }
   });
 
   // --------------------------------------------------------------------------
@@ -2149,8 +2439,44 @@ builtins.input = custom_input
     });
   }
 
-  // Live Sync Hover on sidebar header buttons
-  ['createFileBtn', 'createFolderBtn', 'collapseFoldersBtn', 'refreshFilesBtn'].forEach(btnId => {
+  // Live Sync Hover on buttons throughout the interface
+  const syncedHoverButtonIds = [
+    // Header Actions
+    'languageSelect',
+    'languageDropdownBtn',
+    'formatCodeBtn',
+    'runCodeBtn',
+    'downloadCodeBtn',
+    'copyCodeBtn',
+    'settingsBtn',
+    'roomCopyIcon',
+    'liveSharingToggleLabel',
+    'copyProtectionToggleLabel',
+    'pasteProtectionToggleLabel',
+    'readOnlyToggleLabel',
+    'syntaxHighlightToggleLabel',
+
+    // Execution Console & Output Header Buttons (Image 1)
+    'copyConsoleBtn',
+    'clearConsoleBtn',
+
+    // Sidebar & Chat Drawer Collapse/Expand Arrow Buttons (Image 2)
+    'sidebarCollapseBtn',
+    'sidebarExpandBtn',
+    'closeChatBtn',
+    'chatDrawerExpandBtn',
+
+    // Sidebar Header Buttons
+    'createFileBtn',
+    'createFolderBtn',
+    'collapseFoldersBtn',
+    'refreshFilesBtn',
+
+    // Chat
+    'sendChatBtn'
+  ];
+
+  syncedHoverButtonIds.forEach(btnId => {
     const btn = document.getElementById(btnId);
     if (btn) {
       btn.addEventListener('mouseenter', () => {
@@ -3230,9 +3556,11 @@ builtins.input = custom_input
           if (isShellMode) {
             currentTerminalInputBuffer = currentTerminalInputBuffer.slice(0, -1);
             redrawShellLine();
+            socket.emit('output-sync', { action: 'terminal_input', buffer: currentTerminalInputBuffer, isShellMode: true, cwd: currentShellCwd });
           } else {
             currentTerminalInputBuffer = currentTerminalInputBuffer.slice(0, -1);
             terminal.write('\b \b');
+            socket.emit('output-sync', { action: 'terminal_input', buffer: currentTerminalInputBuffer, isShellMode: false, diff: '\b \b' });
           }
         }
       } else if (data === '\t') { // Tab auto-completion
@@ -3250,6 +3578,7 @@ builtins.input = custom_input
             if (match && match !== prefix) {
               currentTerminalInputBuffer = match + ' ';
               redrawShellLine();
+              socket.emit('output-sync', { action: 'terminal_input', buffer: currentTerminalInputBuffer, isShellMode: true, cwd: currentShellCwd });
             }
           } else {
             const endsWithSpace = buffer.endsWith(' ');
@@ -3264,6 +3593,7 @@ builtins.input = custom_input
                 currentTerminalInputBuffer = prefixBuffer + (match.includes(' ') ? `"${match}"` : match);
               }
               redrawShellLine();
+              socket.emit('output-sync', { action: 'terminal_input', buffer: currentTerminalInputBuffer, isShellMode: true, cwd: currentShellCwd });
             }
           }
         }
@@ -3276,26 +3606,31 @@ builtins.input = custom_input
           }
           currentTerminalInputBuffer = shellHistoryIndex >= 0 ? shellHistory[shellHistory.length - 1 - shellHistoryIndex] : '';
           redrawShellLine();
+          socket.emit('output-sync', { action: 'terminal_input', buffer: currentTerminalInputBuffer, isShellMode: true, cwd: currentShellCwd });
         }
       } else if (data === '\x03') { // Ctrl+C
         if (isShellMode) {
           terminal.write('\x1b[35m^C\x1b[0m\r\n');
           currentTerminalInputBuffer = '';
           redrawShellLine();
+          socket.emit('output-sync', { action: 'terminal_input', buffer: '', isShellMode: true, cwd: currentShellCwd, ctrlC: true });
         }
       } else if (data === '\x15') { // Ctrl+U
         if (isShellMode && currentTerminalInputBuffer.length > 0) {
           currentTerminalInputBuffer = '';
           redrawShellLine();
+          socket.emit('output-sync', { action: 'terminal_input', buffer: '', isShellMode: true, cwd: currentShellCwd });
         }
       } else {
         if (!data.startsWith('\x1b') && data.charCodeAt(0) >= 32) {
           if (isShellMode) {
             currentTerminalInputBuffer += data;
             redrawShellLine();
+            socket.emit('output-sync', { action: 'terminal_input', buffer: currentTerminalInputBuffer, isShellMode: true, cwd: currentShellCwd });
           } else {
             currentTerminalInputBuffer += data;
             terminal.write('\x1b[35m' + data + '\x1b[0m');
+            socket.emit('output-sync', { action: 'terminal_input', buffer: currentTerminalInputBuffer, isShellMode: false, char: data });
           }
         }
       }
@@ -3351,13 +3686,31 @@ builtins.input = custom_input
   const copyConsoleBtn = document.getElementById('copyConsoleBtn');
   if (copyConsoleBtn) {
     copyConsoleBtn.addEventListener('click', () => {
-      if (terminal && terminal.hasSelection()) {
-        navigator.clipboard.writeText(terminal.getSelection()).then(() => {
-          showToast('📋 Terminal selection copied to clipboard!');
-        });
-      } else {
-        showToast('Highlight text in the terminal first to copy it.', 'warning');
+      let outputText = '';
+      if (terminal) {
+        // Extract plain text from entire terminal active buffer
+        const buffer = terminal.buffer.active;
+        const lines = [];
+        for (let i = 0; i < buffer.length; i++) {
+          const line = buffer.getLine(i);
+          if (line) {
+            lines.push(line.translateToString(true));
+          }
+        }
+        outputText = lines.join('\n').trimEnd();
       }
+      if (!outputText && consoleOutput) {
+        outputText = (consoleOutput.innerText || consoleOutput.textContent || '').trim();
+      }
+      if (!outputText) {
+        showToast('Console output is empty.', 'warning');
+        return;
+      }
+      navigator.clipboard.writeText(outputText).then(() => {
+        showToast('📋 Terminal output copied to clipboard!');
+      }).catch(() => {
+        showToast('Failed to copy terminal output.', 'warning');
+      });
     });
   }
 
@@ -3385,13 +3738,9 @@ builtins.input = custom_input
   // 6. UI Drawers, Share & Chat Logic
   // --------------------------------------------------------------------------
 
-  // Copy Room Link (Only triggered when clicking the link icon)
+  // Copy Room Link (Allowed even if live code sharing is off)
   roomShareBtn.addEventListener('click', (e) => {
     if (!e.target.closest('.copy-icon')) {
-      return;
-    }
-    if (!isLiveSharingEnabled) {
-      showToast('⚠️ Sharing is disabled. Enable Live Code Sharing to copy room link!', 'warning');
       return;
     }
     const shareUrl = window.location.href;
@@ -3579,6 +3928,53 @@ builtins.input = custom_input
     sendChatBtn.addEventListener('click', sendChatMessage);
   }
   
+  // Drawer Tab Switching (Chat & Activity)
+  const drawerTabChatBtn = document.getElementById('drawerTabChatBtn');
+  const drawerTabActivityBtn = document.getElementById('drawerTabActivityBtn');
+  const panelChat = document.getElementById('panelChat');
+  const panelActivity = document.getElementById('panelActivity');
+  const chatUnreadBadge = document.getElementById('chatUnreadBadge');
+  const activityUnreadBadge = document.getElementById('activityUnreadBadge');
+  const activityMessages = document.getElementById('activityMessages');
+
+  let activeDrawerTab = 'chat';
+  let unreadChatCount = 0;
+  let unreadActivityCount = 0;
+
+  function switchDrawerTab(tab) {
+    activeDrawerTab = tab;
+    if (tab === 'chat') {
+      if (drawerTabChatBtn) drawerTabChatBtn.classList.add('active');
+      if (drawerTabActivityBtn) drawerTabActivityBtn.classList.remove('active');
+      if (panelChat) panelChat.classList.add('active');
+      if (panelActivity) panelActivity.classList.remove('active');
+      unreadChatCount = 0;
+      if (chatUnreadBadge) {
+        chatUnreadBadge.textContent = '0';
+        chatUnreadBadge.classList.add('hidden');
+      }
+      if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
+    } else {
+      if (drawerTabActivityBtn) drawerTabActivityBtn.classList.add('active');
+      if (drawerTabChatBtn) drawerTabChatBtn.classList.remove('active');
+      if (panelActivity) panelActivity.classList.add('active');
+      if (panelChat) panelChat.classList.remove('active');
+      unreadActivityCount = 0;
+      if (activityUnreadBadge) {
+        activityUnreadBadge.textContent = '0';
+        activityUnreadBadge.classList.add('hidden');
+      }
+      if (activityMessages) activityMessages.scrollTop = activityMessages.scrollHeight;
+    }
+  }
+
+  if (drawerTabChatBtn) {
+    drawerTabChatBtn.addEventListener('click', () => switchDrawerTab('chat'));
+  }
+  if (drawerTabActivityBtn) {
+    drawerTabActivityBtn.addEventListener('click', () => switchDrawerTab('activity'));
+  }
+
   if (chatInput) {
     chatInput.addEventListener('input', updateSendChatBtnState);
     chatInput.addEventListener('keydown', (e) => {
@@ -3588,25 +3984,71 @@ builtins.input = custom_input
 
   updateSendChatBtnState();
 
-  function appendChatMessage(msg) {
+  function getActivityIcon(text) {
+    const t = (text || '').toLowerCase();
+    if (t.includes('joined')) return '👋';
+    if (t.includes('left')) return '🚪';
+    if (t.includes('language')) return '🌐';
+    if (t.includes('protection') || t.includes('security')) return '🔒';
+    if (t.includes('sharing')) return '📡';
+    if (t.includes('copy') || t.includes('paste')) return '🛡️';
+    return '⚡';
+  }
+
+  function appendActivityMessage(msg) {
+    if (!activityMessages) return;
     const div = document.createElement('div');
-    if (msg.isSystem) {
-      div.className = 'chat-bubble system';
-      div.innerHTML = `<span>${msg.text}</span>`;
-    } else {
-      div.className = 'chat-bubble';
-      div.innerHTML = `
-        <div class="chat-author" style="color: ${msg.color}">${msg.sender} <span class="chat-time">${msg.timestamp}</span></div>
-        <div>${escapeHtml(msg.text)}</div>
-      `;
+    div.className = 'activity-item';
+    const icon = getActivityIcon(msg.text || '');
+    div.innerHTML = `
+      <span class="activity-icon">${icon}</span>
+      <div class="activity-content">
+        <div>${escapeHtml(msg.text || '')}</div>
+        <div class="activity-time">${msg.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+      </div>
+    `;
+    activityMessages.appendChild(div);
+    activityMessages.scrollTop = activityMessages.scrollHeight;
+
+    if (activeDrawerTab !== 'activity') {
+      unreadActivityCount++;
+      if (activityUnreadBadge) {
+        activityUnreadBadge.textContent = unreadActivityCount;
+        activityUnreadBadge.classList.remove('hidden');
+      }
     }
+  }
+
+  function appendChatMessage(msg) {
+    if (msg.isSystem) {
+      appendActivityMessage(msg);
+      return;
+    }
+    const div = document.createElement('div');
+    div.className = 'chat-bubble';
+    div.innerHTML = `
+      <div class="chat-author" style="color: ${msg.color || 'var(--accent-cyan)'}">${escapeHtml(msg.sender || 'User')} <span class="chat-time">${msg.timestamp || ''}</span></div>
+      <div>${escapeHtml(msg.text || '')}</div>
+    `;
     chatMessages.appendChild(div);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    if (activeDrawerTab !== 'chat') {
+      unreadChatCount++;
+      if (chatUnreadBadge) {
+        chatUnreadBadge.textContent = unreadChatCount;
+        chatUnreadBadge.classList.remove('hidden');
+      }
+    }
   }
 
   function renderChat(chatHistory) {
-    chatMessages.innerHTML = '';
-    chatHistory.forEach(msg => appendChatMessage(msg));
+    if (chatMessages) chatMessages.innerHTML = '';
+    if (activityMessages) activityMessages.innerHTML = '';
+    chatHistory.forEach(msg => {
+      if (msg.isSystem) appendActivityMessage(msg);
+      else appendChatMessage(msg);
+    });
   }
 
 

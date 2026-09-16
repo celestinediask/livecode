@@ -138,18 +138,20 @@ app.post('/api/sync-input', (req, res) => {
   if (!roomId) {
     return res.status(400).send('');
   }
+
+  const cleanRoomId = (roomId || 'default').trim().toLowerCase();
   
   // Forward the prompt text to all clients in the room to trigger input UI
-  io.to(roomId).emit('output-update', { action: 'input_request', text: promptText || '' });
+  io.to(cleanRoomId).emit('output-update', { action: 'input_request', text: promptText || '' });
 
   const timeoutId = setTimeout(() => {
-    if (pendingInputs.has(roomId) && pendingInputs.get(roomId).res === res) {
-      pendingInputs.delete(roomId);
+    if (pendingInputs.has(cleanRoomId) && pendingInputs.get(cleanRoomId).res === res) {
+      pendingInputs.delete(cleanRoomId);
       res.send('');
     }
   }, 5 * 60 * 1000); // 5 minute timeout
   
-  pendingInputs.set(roomId, { res, timeoutId });
+  pendingInputs.set(cleanRoomId, { res, timeoutId });
 });
 
 // Serve frontend for /room/:id routes
@@ -497,14 +499,13 @@ io.on('connection', (socket) => {
   });
 
   // Real-time mouse movement tracking
-  socket.on('mouse-move', ({ x, y }) => {
+  socket.on('mouse-move', (data) => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
     const room = rooms.get(currentRoomId);
     if (!room.settings.liveSharingEnabled) return;
     socket.to(currentRoomId).emit('mouse-update', {
-      userId: socket.id,
-      x: x,
-      y: y
+      ...data,
+      userId: socket.id
     });
   });
 
@@ -533,6 +534,7 @@ io.on('connection', (socket) => {
   socket.on('language-change', ({ language }) => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
     const room = rooms.get(currentRoomId);
+    if (!language || room.language === language) return;
     room.language = language;
 
     // Default snippet if empty or template
@@ -552,6 +554,24 @@ io.on('connection', (socket) => {
     };
     room.chat.push(sysMessage);
     io.to(currentRoomId).emit('chat-message', sysMessage);
+  });
+
+  // Dropdown Focus Sync
+  socket.on('dropdown-focus', ({ isFocused }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    socket.to(currentRoomId).emit('dropdown-focus-update', { isFocused });
+  });
+
+  // Language Dropdown Open/Close Sync
+  socket.on('language-dropdown-toggle', ({ isOpen }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    socket.to(currentRoomId).emit('language-dropdown-update', { isOpen });
+  });
+
+  // Language Dropdown Item Hover Sync
+  socket.on('language-dropdown-item-hover', ({ value, isHovered }) => {
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    socket.to(currentRoomId).emit('language-dropdown-item-hover-update', { value, isHovered });
   });
 
   // Real-Time Output Sync Listener
