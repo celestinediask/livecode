@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LiveCode — Real-time Code Sharing with Copy Protection</title>
+  
+  <!-- Local Offline Fonts -->
+  <link rel="stylesheet" href="/vendor/fonts/fonts.css">
+  
+  <!-- Local Prism JS syntax highlighting styles -->
+  <link rel="stylesheet" href="/vendor/prism/prism-tomorrow.min.css">
+  
+  <!-- Local xterm.js Terminal Library -->
+  <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
+  <script src="/vendor/xterm/xterm.js"></script>
+  <script src="/vendor/xterm/xterm-addon-fit.js"></script>
+  
+  <!-- Custom Styles -->
+  <link rel="stylesheet" href="/style.css?v=63">
+</head>
+<body class="theme-obsidian">
+
+  <!-- Main App Shell -->
+  <div id="app" class="app-container">
+    
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="logo-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="16 18 22 12 16 6"></polyline>
+            <polyline points="8 6 2 12 8 18"></polyline>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">LiveCode</span>
+        </div>
+        <span id="userRoleBadge" class="user-role-badge guest" title="Role">Guest</span>
+      </div>
+
+      <!-- Room Title & Quick Link -->
+      <div class="room-identity">
+        <div class="room-id-chip live-sharing-off" id="roomShareBtn">
+          <span class="pulse-dot off"></span>
+          <span class="room-text-wrapper">
+            <span class="room-label">LIVE</span>
+            <span class="room-id" id="displayRoomId">------</span>
+          </span>
+          <label class="toggle-switch-mini" id="liveSharingToggleLabel" title="Toggle Live Code Sharing ON/OFF">
+            <input type="checkbox" id="toggleLiveSharing">
+            <span class="slider-mini"></span>
+          </label>
+          <svg class="copy-icon" id="roomCopyIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" title="Copy shareable link"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+        </div>
+        <button type="button" id="joinRoomNavBtn" class="btn btn-secondary btn-join-room" title="Join another room (Alt+J)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
+            <polyline points="10 17 15 12 10 7"></polyline>
+            <line x1="15" y1="12" x2="3" y2="12"></line>
+          </svg>
+          <span>Join</span>
+        </button>
+        <button type="button" id="newRoomNavBtn" class="btn btn-secondary btn-new-room" title="Create a new room">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          <span>New</span>
+        </button>
+        <button type="button" id="killRoomNavBtn" class="btn btn-secondary btn-kill-room host-only-item hidden" title="Kill Room (Host Only)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="15" y1="9" x2="9" y2="15"></line>
+            <line x1="9" y1="9" x2="15" y2="15"></line>
+          </svg>
+          <span>Kill</span>
+        </button>
+      </div>
+
+      <!-- Protection Control Panel -->
+      <div class="protection-panel" id="protectionPanel">
+        <div class="protection-toggles">
+          <!-- Copy Protection Switch -->
+          <label class="icon-toggle" title="Prevent guests from copying code" id="copyProtectionToggleLabel">
+            <input type="checkbox" id="toggleCopyProtection">
+            <span class="icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+            </span>
+          </label>
+
+          <!-- Paste Protection Switch -->
+          <label class="icon-toggle" id="pasteProtectionToggleLabel" title="Prevent pasting external code into editor">
+            <input type="checkbox" id="togglePasteProtection">
+            <span class="icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>
+            </span>
+          </label>
+
+          <!-- Read-Only Mode Switch -->
+          <label class="icon-toggle" id="readOnlyToggleLabel" title="Make room read-only for participants">
+            <input type="checkbox" id="toggleReadOnly">
+            <span class="icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+            </span>
+          </label>
+
+          <!-- Syntax Highlighting Switch -->
+          <label class="icon-toggle" id="syntaxHighlightToggleLabel" title="Toggle syntax highlighting ON/OFF">
+            <input type="checkbox" id="toggleSyntaxHighlight" checked>
+            <span class="icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"></circle><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"></circle><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"></circle><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"></circle><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.563-2.512 5.563-5.563C21.437 6.438 17.203 2 12 2z"></path></svg>
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Undo / Redo Actions (in center between font color and language switcher) -->
+      <div class="undo-redo-group" id="undoRedoGroup">
+        <button id="undoBtn" class="btn btn-secondary btn-icon" title="Undo (Ctrl+Z)" disabled>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"></path><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"></path></svg>
+        </button>
+
+        <button id="redoBtn" class="btn btn-secondary btn-icon" title="Redo (Ctrl+Y)" disabled>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"></path><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"></path></svg>
+        </button>
+      </div>
+
+      <!-- Right Header Actions -->
+      <div class="header-actions">
+        <!-- Language Selector -->
+        <div class="select-wrapper custom-dropdown" id="languageSelectWrapper">
+          <button type="button" id="languageDropdownBtn" class="styled-select dropdown-trigger" title="Select Language">
+            <span id="languageSelectedLabel">Python 3</span>
+            <svg class="dropdown-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </button>
+          <div id="languageDropdownMenu" class="custom-dropdown-menu hidden">
+            <div class="dropdown-item selected" data-value="python">
+              <span>Python 3</span>
+              <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            </div>
+          </div>
+          <select id="languageSelect" class="styled-select" style="display: none;">
+            <option value="python" selected>Python 3</option>
+          </select>
+        </div>
+
+        <!-- Exam Mode Switch (Anti-Cheat & Fullscreen Enforcement) -->
+        <button type="button" id="toggleExamMode" class="btn btn-secondary btn-icon" title="Exam Mode: Enforce Fullscreen & Anti-Cheat Proctoring">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"></path><path d="M6 12v5c3 3 9 3 12 0v-5"></path></svg>
+        </button>
+
+        <!-- Collaborative Timer Widget -->
+        <div class="timer-widget-wrapper" id="timerWidgetWrapper">
+          <button id="timerBtn" class="btn btn-secondary timer-btn" title="Timer / Stopwatch">
+            <svg class="timer-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+            <span id="timerDisplayChip" class="timer-display-chip">05:00</span>
+          </button>
+
+          <!-- Timer Dropdown Popover -->
+          <div id="timerDropdown" class="timer-dropdown hidden">
+            <div class="timer-popover-header">
+              <div class="timer-tabs">
+                <button type="button" id="timerTabCountdown" class="timer-tab-btn active">Countdown</button>
+                <button type="button" id="timerTabStopwatch" class="timer-tab-btn">Stopwatch</button>
+              </div>
+              <button type="button" id="timerCloseBtn" class="timer-close-btn" title="Close">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
+
+            <div class="timer-popover-body">
+              <!-- Digital Clock Display -->
+              <div class="timer-clock-display" id="timerClockDisplay">
+                <span id="timerClockMinutes">05</span>:<span id="timerClockSeconds">00</span>
+              </div>
+
+              <!-- Preset Quick Pick Buttons (Visible in Countdown mode) -->
+              <div class="timer-presets" id="timerPresets">
+                <button type="button" class="timer-preset-btn" data-seconds="60">1m</button>
+                <button type="button" class="timer-preset-btn" data-seconds="180">3m</button>
+                <button type="button" class="timer-preset-btn active" data-seconds="300">5m</button>
+                <button type="button" class="timer-preset-btn" data-seconds="600">10m</button>
+                <button type="button" class="timer-preset-btn" data-seconds="900">15m</button>
+                <button type="button" class="timer-preset-btn" data-seconds="1500">25m</button>
+                <button type="button" class="timer-preset-btn" data-seconds="1800">30m</button>
+                <button type="button" class="timer-preset-btn" data-seconds="2700">45m</button>
+              </div>
+
+              <!-- Custom Duration Input Row (Visible in Countdown mode) -->
+              <div class="timer-custom-row" id="timerCustomRow">
+                <label for="timerCustomMinutes">Custom:</label>
+                <input type="number" id="timerCustomMinutes" min="1" max="180" value="5" placeholder="Min" />
+                <span>min</span>
+                <button type="button" id="timerApplyCustomBtn" class="timer-apply-btn">Set</button>
+              </div>
+
+              <!-- Controls (Start/Pause, Reset) -->
+              <div class="timer-controls">
+                <button type="button" id="timerStartPauseBtn" class="timer-ctrl-btn btn-timer-start">
+                  <svg id="timerPlayIcon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                  </svg>
+                  <svg id="timerPauseIcon" class="hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="6" y="4" width="4" height="16"></rect>
+                    <rect x="14" y="4" width="4" height="16"></rect>
+                  </svg>
+                  <span id="timerStartPauseText">Start</span>
+                </button>
+                <button type="button" id="timerResetBtn" class="timer-ctrl-btn btn-timer-reset" title="Reset Timer">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="1 4 1 10 7 10"></polyline>
+                    <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+                  </svg>
+                  <span>Reset</span>
+                </button>
+              </div>
+
+              <!-- Sound Alarm Toggle -->
+              <div class="timer-options-row">
+                <label class="timer-sound-label" id="timerSoundLabel" title="Play sound when countdown completes">
+                  <input type="checkbox" id="timerSoundToggle" checked />
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                  </svg>
+                  <span>Alarm Sound</span>
+                </label>
+                <span class="timer-shared-badge" title="Syncs live across all room collaborators">Shared</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button id="voiceCallBtn" class="btn btn-secondary btn-icon" title="Start / Join Voice Call">
+          <svg class="voice-call-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+          </svg>
+          <span id="voiceCallCount" class="voice-badge-count hidden">0</span>
+        </button>
+
+        <button id="downloadCodeBtn" class="btn btn-secondary btn-icon" title="Download Code File">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        </button>
+
+        <button id="copyCodeBtn" class="btn btn-secondary btn-icon" title="Copy Code to Clipboard">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        </button>
+
+        <button id="formatCodeBtn" class="btn btn-secondary btn-icon" title="Format Code (Shift+Alt+F)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" y1="10" x2="3" y2="10"></line><line x1="21" y1="6" x2="3" y2="6"></line><line x1="21" y1="14" x2="3" y2="14"></line><line x1="21" y1="18" x2="3" y2="18"></line></svg>
+        </button>
+
+        <button id="runCodeBtn" class="btn btn-success btn-icon" title="Run Code">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+        </button>
+
+        <div class="settings-wrapper" style="position: relative;">
+          <button id="settingsBtn" class="btn btn-secondary btn-icon" title="Account & Settings">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+              <circle cx="12" cy="7" r="4"></circle>
+            </svg>
+          </button>
+          <div id="settingsDropdown" class="settings-dropdown hidden">
+            <div class="settings-header">Account & Settings</div>
+            <div class="settings-body">
+              <!-- Account Profile Section -->
+              <div class="account-profile-card">
+                <div class="account-avatar">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                    <circle cx="12" cy="7" r="4"></circle>
+                  </svg>
+                </div>
+                <div class="account-info">
+                  <div class="account-name-row">
+                    <span id="accountDropdownUsername" class="account-username">Guest</span>
+                    <button type="button" id="accountRenameBtn" class="account-rename-btn" title="Change Username">
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Live Share Item inside Account Dropdown -->
+              <div class="settings-item" id="settingsLiveShareItem">
+                <div class="settings-item-info">
+                  <div class="settings-item-title settings-live-title">LIVE</div>
+                </div>
+                <div class="settings-compact-chip live-sharing-off" id="settingsRoomShareBtn" title="Toggle Live Code Sharing & Copy Link">
+                  <span class="pulse-dot off"></span>
+                  <label class="toggle-switch-mini" id="liveSharingToggleLabelSettings" title="Toggle Live Code Sharing ON/OFF">
+                    <input type="checkbox" id="toggleLiveSharingSettings">
+                    <span class="slider-mini"></span>
+                  </label>
+                  <svg class="copy-icon" id="settingsRoomCopyIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" title="Copy shareable link"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+                  <svg class="kill-room-icon host-only-item hidden" id="settingsChipKillRoomBtn" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" title="Kill Room (Host Only)"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
+                </div>
+              </div>
+
+              <!-- Join Room Item in Settings -->
+              <div class="settings-item" id="settingsJoinRoomItem">
+                <div class="settings-item-info">
+                  <div class="settings-item-title">Join Room</div>
+                  <div class="settings-item-desc">Switch or connect to another session</div>
+                </div>
+                <button type="button" id="settingsJoinRoomBtn" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.8rem; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px;">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
+                    <polyline points="10 17 15 12 10 7"></polyline>
+                    <line x1="15" y1="12" x2="3" y2="12"></line>
+                  </svg>
+                  <span>Join</span>
+                </button>
+              </div>
+
+              <!-- New Room Item in Settings -->
+              <div class="settings-item" id="settingsNewRoomItem">
+                <div class="settings-item-info">
+                  <div class="settings-item-title">New Room</div>
+                  <div class="settings-item-desc">Create a fresh new coding session</div>
+                </div>
+                <button type="button" id="settingsNewRoomBtn" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.8rem; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px;">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                  </svg>
+                  <span>New</span>
+                </button>
+              </div>
+
+              <!-- Language Select (Always Visible in Account & Settings) -->
+              <div class="settings-item" id="settingsLanguageItem">
+                <div class="settings-item-info">
+                  <div class="settings-item-title">Language</div>
+                  <div class="settings-item-desc">Runtime environment</div>
+                </div>
+                <div class="select-wrapper custom-dropdown" id="settingsLanguageWrapper">
+                  <select id="settingsLanguageSelect" class="styled-select" style="padding: 0.3rem 0.6rem; font-size: 0.8rem;">
+                    <option value="python" selected>Python 3</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Kill Room (Host only) -->
+              <div class="settings-item host-only-item hidden" id="settingsKillRoomItem" style="margin-top: 8px; border-top: 1px solid var(--border-color, #334155); padding-top: 12px;">
+                <div class="settings-item-info">
+                  <div class="settings-item-title" style="color: #ef4444;">Kill Room</div>
+                  <div class="settings-item-desc">Permanently close this session</div>
+                </div>
+                <button type="button" id="killRoomBtn" class="btn" style="background: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid #ef4444; padding: 4px 10px; border-radius: 4px;">Kill</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Exam Mode Warning Banner for Anti-Cheat Proctoring -->
+    <div id="examModeBanner" class="exam-mode-banner hidden">
+      <div class="exam-mode-banner-content">
+        <span class="exam-badge-icon">🎓</span>
+        <span class="exam-banner-text"><strong>Exam Mode Active</strong></span>
+      </div>
+      <div id="candidateViolationChip" class="candidate-violation-chip hidden">
+        <span>⚠️ 0 Warnings</span>
+      </div>
+    </div>
+
+    <!-- Main Workspace Section -->
+    <main class="workspace">
+
+      <!-- Floating Sidebar Expand Tab (Visible when sidebar is collapsed) -->
+      <button id="sidebarExpandBtn" class="drawer-edge-tab drawer-edge-left" title="Show File Tree">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+      </button>
+
+      <!-- Left Sidebar Drawer: Files & Collaborators -->
+      <aside class="sidebar collapsed" id="sidebar">
+        <!-- Files Section -->
+        <div class="sidebar-header">
+          <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+            <button id="sidebarCollapseBtn" class="header-arrow-btn" title="Hide Sidebar">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            </button>
+            <div class="sidebar-title" style="font-weight: 600; font-size: 0.9rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1;">Files</div>
+          </div>
+          <div style="display: flex; gap: 4px; align-items: center; flex-shrink: 0;">
+            <button id="createFileBtn" class="btn btn-secondary btn-icon" style="width: 24px; height: 24px; padding: 2px; flex-shrink: 0;" title="New File">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+            </button>
+            <button id="createFolderBtn" class="btn btn-secondary btn-icon" style="width: 24px; height: 24px; padding: 2px; flex-shrink: 0;" title="New Folder">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><line x1="9" y1="14" x2="15" y2="14"></line></svg>
+            </button>
+            <button id="collapseFoldersBtn" class="btn btn-secondary btn-icon" style="width: 24px; height: 24px; padding: 2px; flex-shrink: 0;" title="Collapse All">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
+            </button>
+            <button id="refreshFilesBtn" class="btn btn-secondary btn-icon" style="width: 24px; height: 24px; padding: 2px; flex-shrink: 0;" title="Refresh Files">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+            </button>
+          </div>
+        </div>
+        <div class="sidebar-content" style="flex: 1; overflow-y: auto;">
+          <div class="user-list" id="fileListContainer" style="padding: 8px;">
+            <!-- Files populated here -->
+          </div>
+        </div>
+      </aside>
+      <div id="sidebarBackdrop" class="sidebar-backdrop"></div>
+
+      <!-- Center Code Editor Container -->
+      <section class="editor-section">
+
+        <!-- Editor Tabs Bar -->
+        <div class="editor-tabs" id="editorTabs">
+          <!-- Tabs populated here -->
+        </div>
+
+        <!-- Code Editor Area -->
+        <div class="editor-wrapper" id="editorWrapper">
+          <!-- Line Numbers Gutter -->
+          <div class="editor-line-numbers" id="lineNumbers">1</div>
+
+          <!-- Code Text Area / Highlighting Layer -->
+          <div class="code-editor-area" id="codeEditorArea">
+            <textarea id="codeTextarea" spellcheck="false" autocomplete="off" capitalize="off" placeholder="# Type or paste Python code here..."></textarea>
+
+            <!-- Syntax Highlighting Display Layer -->
+            <pre id="highlightPre" class="highlight-layer"><code id="highlightCode" class="language-python"></code></pre>
+
+            <!-- Real-time Collaborator Cursors Layer -->
+            <div class="collaborator-cursors" id="collaboratorCursors"></div>
+
+            <!-- Dynamic Watermark Layer when Copying Disabled -->
+            <div class="watermark-overlay" id="watermarkOverlay">
+              <div class="watermark-text">LIVECODE PROTECTED • COPY DISABLED</div>
+              <div class="watermark-text">LIVECODE PROTECTED • COPY DISABLED</div>
+              <div class="watermark-text">LIVECODE PROTECTED • COPY DISABLED</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Output Terminal Drawer -->
+        <div class="output-drawer" id="outputDrawer">
+          <div class="console-resizer" id="consoleResizer" title="Drag to resize console"></div>
+          <div class="output-header">
+            <div class="output-title" title="Click to collapse/expand console">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+              <span>Execution Console & Output</span>
+              <span id="outputStatusBadge" class="output-status-badge hidden"></span>
+            </div>
+            <div class="output-actions">
+              <button id="copyConsoleBtn" class="btn-text btn-icon-sm" title="Copy Output to Clipboard">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              </button>
+              <button id="clearConsoleBtn" class="btn-text btn-icon-sm" title="Clear Console Output">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+              </button>
+              <button id="expandConsoleBtn" class="btn-text btn-icon-sm" title="Expand Console">
+                <svg class="icon-expand" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
+                <svg class="icon-shrink" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="10" y1="14" x2="3" y2="21"></line></svg>
+              </button>
+              <button id="collapseConsoleBtn" class="btn-text btn-icon-sm" title="Collapse Console">
+                <svg class="icon-collapse" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                <svg class="icon-uncollapse" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: none;"><polyline points="18 15 12 9 6 15"></polyline></svg>
+              </button>
+            </div>
+          </div>
+          <div class="output-body" id="consoleOutput"></div>
+          <div id="htmlPreviewContainer" class="html-preview-container hidden">
+            <iframe id="htmlPreviewFrame" title="HTML Output Preview"></iframe>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- Floating Chat Drawer Expand Tab (Visible when chat is collapsed) -->
+      <button id="chatDrawerExpandBtn" class="drawer-edge-tab drawer-edge-right" title="Show Collaborators & Chat">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+      </button>
+
+      <!-- Right Drawer: Collaborators (Top Half) & Session Chat (Bottom Half) -->
+      <aside class="chat-drawer collapsed" id="chatDrawer">
+        <!-- Top Half: Collaborators -->
+        <div class="drawer-section drawer-collaborators-section">
+          <div class="drawer-section-header">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <!-- Distinctive Collaborators/Team Icon -->
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+              </svg>
+              <span style="font-size: 0.85rem; font-weight: 700; color: var(--text-primary); line-height: 1;">Collaborators</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span id="activeUserCount" class="badge-pill">1</span>
+              <button id="closeChatBtn" class="header-arrow-btn" title="Hide Collaborators & Chat">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+              </button>
+            </div>
+          </div>
+          <!-- Voice Call Active Session Card / Mini Toolbar -->
+          <div id="voiceCallBanner" class="voice-call-banner hidden">
+            <div class="voice-banner-header">
+              <div class="voice-live-indicator">
+                <span class="voice-pulse-circle"></span>
+                <span class="voice-banner-title">Voice Call Active</span>
+              </div>
+              <div class="voice-banner-actions">
+                <button type="button" id="voiceMuteToggleBtn" class="voice-ctrl-btn" title="Mute / Unmute Microphone">
+                  <svg class="icon-mic-on" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                  </svg>
+                  <svg class="icon-mic-off hidden" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                    <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path>
+                    <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path>
+                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                  </svg>
+                </button>
+                <button type="button" id="voiceLeaveCallBtn" class="voice-ctrl-btn voice-leave-btn" title="Leave Voice Call">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"></path>
+                    <line x1="23" y1="1" x2="1" y2="23"></line>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div id="voiceParticipantsGrid" class="voice-participants-grid">
+              <!-- Active voice callers mini avatar indicators -->
+            </div>
+          </div>
+          <div class="user-list" id="userListContainer">
+            <!-- Users populated here -->
+          </div>
+        </div>
+
+        <!-- Bottom Half: Session Chat -->
+        <!-- Bottom Half: Chat & Activity Tabs -->
+        <div class="drawer-section drawer-chat-section">
+          <div class="drawer-section-header drawer-tabs-header">
+            <div class="drawer-tab-buttons">
+              <button type="button" class="drawer-tab-btn active" id="drawerTabChatBtn" data-tab="chat">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
+                </svg>
+                <span>Chat</span>
+                <span id="chatUnreadBadge" class="drawer-unread-badge hidden">0</span>
+              </button>
+              <button type="button" class="drawer-tab-btn" id="drawerTabActivityBtn" data-tab="activity">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                </svg>
+                <span>Activity</span>
+                <span id="activityUnreadBadge" class="drawer-unread-badge hidden">0</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Chat Tab Panel -->
+          <div class="drawer-tab-panel active" id="panelChat">
+            <div class="chat-messages" id="chatMessages"></div>
+            <div class="chat-input-area">
+              <input type="text" id="chatInput" placeholder="Type a message..." maxlength="300">
+              <button id="sendChatBtn" class="btn btn-primary btn-sm" disabled>Send</button>
+            </div>
+          </div>
+
+          <!-- Activity Tab Panel -->
+          <div class="drawer-tab-panel" id="panelActivity">
+            <div class="activity-messages" id="activityMessages"></div>
+          </div>
+        </div>
+      </aside>
+
+    </main>
+
+    <!-- Guest Username Requirement Modal -->
+    <div id="guestUsernameModal" class="modal-overlay hidden" style="position: fixed; inset: 0; background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; z-index: 10000;">
+      <div style="background: var(--bg-card, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 12px; padding: 24px; width: 90%; max-width: 400px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); text-align: center;">
+        <div style="font-size: 2rem; margin-bottom: 8px;">👤</div>
+        <h3 style="margin: 0 0 8px 0; color: var(--text-primary, #f8fafc); font-size: 1.25rem;">Enter Your Username</h3>
+        <p style="margin: 0 0 16px 0; color: var(--text-muted, #94a3b8); font-size: 0.875rem;">A username is required to join this live code sharing session.</p>
+        <form id="guestUsernameForm" onsubmit="event.preventDefault();">
+          <input type="text" id="guestUsernameInput" placeholder="Enter username..." maxlength="30" autocomplete="off" style="width: 100%; padding: 10px 14px; border-radius: 6px; border: 1px solid var(--border-color, #334155); background: var(--bg-surface, #0f172a); color: var(--text-primary, #f8fafc); font-size: 0.95rem; margin-bottom: 16px; outline: none; box-sizing: border-box;">
+          <button type="submit" id="submitGuestUsernameBtn" class="btn btn-primary" style="width: 100%; padding: 10px; font-weight: 600; cursor: pointer;">Join Live Session</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Join Room Dialog Modal -->
+    <div id="joinRoomModal" class="modal-overlay hidden" style="position: fixed; inset: 0; background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; z-index: 10000;">
+      <div class="join-room-card" style="background: var(--bg-card, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 16px; padding: 28px 24px; width: 90%; max-width: 440px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); animation: callModalPop 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="width: 40px; height: 40px; border-radius: 10px; background: rgba(0, 240, 255, 0.1); border: 1px solid rgba(0, 240, 255, 0.3); display: flex; align-items: center; justify-content: center; color: var(--accent-cyan, #00f0ff); flex-shrink: 0;">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
+                <polyline points="10 17 15 12 10 7"></polyline>
+                <line x1="15" y1="12" x2="3" y2="12"></line>
+              </svg>
+            </div>
+            <div>
+              <h3 style="margin: 0; color: var(--text-primary, #f8fafc); font-size: 1.2rem; font-weight: 700;">Join Room</h3>
+              <p style="margin: 2px 0 0 0; color: var(--text-muted, #94a3b8); font-size: 0.82rem;">Enter room code or link to collaborate</p>
+            </div>
+          </div>
+          <button type="button" id="closeJoinRoomModalBtn" class="header-arrow-btn" style="width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center;" title="Close">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
+
+        <form id="joinRoomForm" autocomplete="off" onsubmit="event.preventDefault();">
+          <div style="margin-bottom: 16px;">
+            <label for="joinRoomInput" style="display: block; font-size: 0.82rem; font-weight: 600; color: var(--text-secondary, #cbd5e1); margin-bottom: 6px;">
+              Room Code or Link
+            </label>
+            <div style="position: relative;">
+              <input type="text" id="joinRoomInput" placeholder="e.g. 6-character code or full URL" autocomplete="off" spellcheck="false" style="width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border-color, #334155); background: var(--bg-surface, #0f172a); color: var(--text-primary, #f8fafc); font-size: 0.95rem; font-family: monospace; outline: none; box-sizing: border-box; transition: border-color 0.2s;">
+            </div>
+            <div id="joinRoomStatus" class="hidden" style="font-size: 0.8rem; margin-top: 6px;"></div>
+          </div>
+
+          <div style="margin-bottom: 20px;">
+            <label for="joinUsernameInput" style="display: block; font-size: 0.82rem; font-weight: 600; color: var(--text-secondary, #cbd5e1); margin-bottom: 6px;">
+              Your Display Name
+            </label>
+            <input type="text" id="joinUsernameInput" placeholder="Enter your display name..." maxlength="30" autocomplete="off" style="width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border-color, #334155); background: var(--bg-surface, #0f172a); color: var(--text-primary, #f8fafc); font-size: 0.92rem; outline: none; box-sizing: border-box; transition: border-color 0.2s;">
+          </div>
+
+          <div style="display: flex; gap: 10px; margin-bottom: 12px;">
+            <button type="button" id="cancelJoinRoomBtn" class="btn btn-secondary" style="flex: 1; padding: 10px; font-weight: 600; cursor: pointer;">
+              Cancel
+            </button>
+            <button type="submit" id="submitJoinRoomBtn" class="btn btn-primary" style="flex: 1; padding: 10px; font-weight: 600; cursor: pointer;">
+              Join Session
+            </button>
+          </div>
+
+          <div style="text-align: center; border-top: 1px solid var(--border-color, #334155); padding-top: 12px; margin-top: 4px;">
+            <span style="font-size: 0.8rem; color: var(--text-muted, #94a3b8);">Want a fresh session? </span>
+            <button type="button" id="joinModalCreateNewBtn" class="btn-link" style="background: none; border: none; color: var(--accent-cyan, #00f0ff); font-size: 0.8rem; font-weight: 600; cursor: pointer; text-decoration: underline; padding: 0;">Create New Room</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Incoming Voice Call Center Dialog Modal -->
+    <div id="incomingCallModal" class="incoming-call-modal hidden">
+      <div class="incoming-call-card">
+        <div class="incoming-call-avatar-wrap">
+          <div class="incoming-call-pulse"></div>
+          <div class="incoming-call-avatar" id="incomingCallAvatar">C</div>
+        </div>
+        <div class="incoming-call-title" id="incomingCallCallerName">Caller</div>
+        <div class="incoming-call-sub">Incoming voice call...</div>
+        <div class="incoming-call-actions">
+          <button type="button" id="rejectCallModalBtn" class="incoming-call-btn btn-reject">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+            <span>Reject</span>
+          </button>
+          <button type="button" id="acceptCallModalBtn" class="incoming-call-btn btn-accept">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+            </svg>
+            <span>Accept</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Times Up Dialog Modal -->
+    <div id="timesUpModal" class="modal-overlay hidden" style="position: fixed; inset: 0; background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; z-index: 10000;">
+      <div class="times-up-card" style="background: var(--bg-card, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 16px; padding: 28px 24px; width: 90%; max-width: 420px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6), 0 0 25px rgba(244, 63, 94, 0.2); text-align: center; animation: callModalPop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);">
+        <div style="width: 60px; height: 60px; border-radius: 50%; background: rgba(244, 63, 94, 0.15); border: 1.5px solid rgba(244, 63, 94, 0.5); display: flex; align-items: center; justify-content: center; margin: 0 auto 16px auto; color: var(--accent-rose, #f43f5e);">
+          <svg class="bell-ringing-icon" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+          </svg>
+        </div>
+        <h3 style="margin: 0 0 8px 0; color: var(--text-primary, #f8fafc); font-size: 1.35rem; font-weight: 700;">Time's Up!</h3>
+        <p id="timesUpModalDesc" style="margin: 0 0 20px 0; color: var(--text-secondary, #94a3b8); font-size: 0.9rem; line-height: 1.5;">
+          Guests are view only until you allow. Clicking on the view button (eye icon) in the top bar will allow guests to edit.
+        </p>
+
+        <!-- Actions -->
+        <div class="times-up-actions" style="display: flex; justify-content: center;">
+          <button type="button" id="timesUpDismissBtn" class="btn btn-primary" style="width: 100%; padding: 10px; font-weight: 600; cursor: pointer;">
+            Got it
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Exam Mode Fullscreen Required Modal Overlay -->
+    <div id="examFullscreenModal" class="modal-overlay hidden" style="position: fixed; inset: 0; background: rgba(15, 23, 42, 0.94); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); display: flex; align-items: center; justify-content: center; z-index: 10001;">
+      <div class="exam-modal-card" style="background: var(--bg-card, #1e293b); border: 1.5px solid var(--accent-rose, #f43f5e); border-radius: 16px; padding: 32px 28px; width: 90%; max-width: 460px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7), 0 0 35px rgba(244, 63, 94, 0.25); text-align: center; animation: callModalPop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);">
+        <div style="width: 64px; height: 64px; border-radius: 50%; background: rgba(244, 63, 94, 0.15); border: 1.5px solid rgba(244, 63, 94, 0.5); display: flex; align-items: center; justify-content: center; margin: 0 auto 18px auto; color: var(--accent-rose, #f43f5e);">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 10v6M2 10l10-5 10 5-10 5z"/>
+            <path d="M6 12v5c3 3 9 3 12 0v-5"/>
+          </svg>
+        </div>
+        <h3 style="margin: 0 0 10px 0; color: var(--text-primary, #f8fafc); font-size: 1.35rem; font-weight: 700;">Exam Mode Enforced</h3>
+        <p style="margin: 0 0 16px 0; color: var(--text-secondary, #cbd5e1); font-size: 0.9rem; line-height: 1.6;">
+          This code test requires <strong>Full-Screen Mode</strong>.
+        </p>
+
+        <!-- Exam Time Display Box -->
+        <div id="examFullscreenTimeBox" style="background: rgba(15, 23, 42, 0.75); border: 1px solid var(--border-color, #334155); border-radius: 10px; padding: 12px 16px; margin-bottom: 22px; display: flex; align-items: center; justify-content: space-between;">
+          <div style="display: flex; align-items: center; gap: 8px; font-size: 0.88rem; color: var(--text-secondary, #cbd5e1); font-weight: 500;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-rose, #f43f5e)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+            <span>Exam Time:</span>
+          </div>
+          <span id="examFullscreenTimerVal" style="font-family: monospace; font-size: 1.15rem; font-weight: 700; color: var(--accent-rose, #f43f5e); letter-spacing: 0.5px;">--:--</span>
+        </div>
+
+        <button type="button" id="examEnterFullscreenBtn" class="btn btn-primary" style="width: 100%; padding: 12px; font-weight: 700; font-size: 0.95rem; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; background: var(--accent-rose, #f43f5e); border-color: var(--accent-rose, #f43f5e);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+          Start Test
+        </button>
+      </div>
+    </div>
+
+    <!-- Exam Mode Time Setup Modal (Prompt Host to Set Exam Duration) -->
+    <div id="examTimeModal" class="modal-overlay hidden" style="position: fixed; inset: 0; background: rgba(15, 23, 42, 0.88); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; z-index: 10001;">
+      <div class="exam-modal-card" style="background: var(--bg-card, #1e293b); border: 1.5px solid var(--accent-rose, #f43f5e); border-radius: 16px; padding: 28px 24px; width: 90%; max-width: 440px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7), 0 0 35px rgba(244, 63, 94, 0.25); text-align: center; animation: callModalPop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);">
+        <div style="width: 56px; height: 56px; border-radius: 50%; background: rgba(244, 63, 94, 0.15); border: 1.5px solid rgba(244, 63, 94, 0.5); display: flex; align-items: center; justify-content: center; margin: 0 auto 16px auto; color: var(--accent-rose, #f43f5e);">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+        </div>
+        <h3 style="margin: 0 0 8px 0; color: var(--text-primary, #f8fafc); font-size: 1.3rem; font-weight: 700;">Set Exam Duration</h3>
+        <p style="margin: 0 0 18px 0; color: var(--text-secondary, #cbd5e1); font-size: 0.88rem; line-height: 1.5;">
+          Specify the test countdown timer duration before activating Exam Mode.
+        </p>
+
+        <!-- Quick preset duration chips -->
+        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 16px;">
+          <button type="button" class="exam-preset-btn" data-minutes="1">1m</button>
+          <button type="button" class="exam-preset-btn" data-minutes="2">2m</button>
+          <button type="button" class="exam-preset-btn active" data-minutes="5">5m</button>
+          <button type="button" class="exam-preset-btn" data-minutes="10">10m</button>
+        </div>
+
+        <!-- Custom Duration Input Row -->
+        <div style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 22px; background: rgba(15, 23, 42, 0.6); padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border-color, #334155);">
+          <span style="font-size: 0.85rem; color: var(--text-secondary, #cbd5e1);">Custom Minutes:</span>
+          <input type="number" id="examDurationInput" min="1" max="360" value="5" style="width: 70px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-color, #334155); background: var(--bg-surface, #0f172a); color: var(--text-primary, #f8fafc); font-size: 0.95rem; font-weight: 700; text-align: center; outline: none;">
+          <span style="font-size: 0.85rem; color: var(--text-muted, #94a3b8);">min</span>
+        </div>
+
+        <!-- Modal Actions -->
+        <div style="display: flex; gap: 10px;">
+          <button type="button" id="cancelExamTimeBtn" class="btn btn-secondary" style="flex: 1; padding: 10px; font-weight: 600; cursor: pointer;">
+            Cancel
+          </button>
+          <button type="button" id="startExamWithTimeBtn" class="btn btn-primary" style="flex: 1; padding: 10px; font-weight: 600; cursor: pointer; background: var(--accent-rose, #f43f5e); border-color: var(--accent-rose, #f43f5e);">
+            Start Exam
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Host Proctor Audit Log Modal -->
+    <div id="proctorAuditModal" class="modal-overlay hidden" style="position: fixed; inset: 0; background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; z-index: 10002;">
+      <div style="background: var(--bg-card, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 16px; padding: 24px; width: 90%; max-width: 520px; max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color);">
+          <div>
+            <h3 style="margin: 0; color: var(--text-primary); font-size: 1.15rem; display: flex; align-items: center; gap: 8px;">
+              <span>🛡️ Anti-Cheat Activity Report</span>
+            </h3>
+            <div id="proctorCandidateSubtitle" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 4px;">Candidate: Unknown</div>
+          </div>
+          <button type="button" id="closeProctorAuditBtn" class="header-arrow-btn" style="width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center;" title="Close">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
+
+        <!-- Summary Stat Cards -->
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px;">
+          <div style="background: rgba(15, 23, 42, 0.6); padding: 10px; border-radius: 8px; text-align: center; border: 1px solid var(--border-color);">
+            <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase;">Tab Switches</div>
+            <div id="proctorStatTabSwitches" style="font-size: 1.25rem; font-weight: 700; color: #ef4444; margin-top: 2px;">0</div>
+          </div>
+          <div style="background: rgba(15, 23, 42, 0.6); padding: 10px; border-radius: 8px; text-align: center; border: 1px solid var(--border-color);">
+            <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase;">Window Blurs</div>
+            <div id="proctorStatWindowBlurs" style="font-size: 1.25rem; font-weight: 700; color: #f59e0b; margin-top: 2px;">0</div>
+          </div>
+          <div style="background: rgba(15, 23, 42, 0.6); padding: 10px; border-radius: 8px; text-align: center; border: 1px solid var(--border-color);">
+            <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase;">Fullscreen Exits</div>
+            <div id="proctorStatFullscreenExits" style="font-size: 1.25rem; font-weight: 700; color: #a855f7; margin-top: 2px;">0</div>
+          </div>
+        </div>
+
+        <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px;">Incident Timeline</div>
+        <div id="proctorAuditLogsContainer" style="flex: 1; overflow-y: auto; max-height: 280px; display: flex; flex-direction: column; gap: 8px; padding-right: 4px;">
+          <!-- Log rows -->
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border-color);">
+          <button type="button" id="dismissProctorAuditBtn" class="btn btn-secondary" style="padding: 8px 16px; font-size: 0.85rem; cursor: pointer;">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Editor Context Menu -->
+    <div id="editorContextMenu" class="editor-context-menu hidden">
+      <div class="context-menu-item" id="ctxCutBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><line x1="20" y1="4" x2="8.12" y2="15.88"></line><line x1="14.47" y1="14.48" x2="20" y2="20"></line><line x1="8.12" y1="8.12" x2="12" y2="12"></line></svg>
+        <span>Cut</span>
+        <span class="context-shortcut">Ctrl+X</span>
+      </div>
+      <div class="context-menu-item" id="ctxCopyBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        <span>Copy</span>
+        <span class="context-shortcut">Ctrl+C</span>
+      </div>
+      <div class="context-menu-item" id="ctxPasteBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
+        <span>Paste</span>
+        <span class="context-shortcut">Ctrl+V</span>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-item disabled" id="ctxUndoBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"></path><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"></path></svg>
+        <span>Undo</span>
+        <span class="context-shortcut">Ctrl+Z</span>
+      </div>
+      <div class="context-menu-item disabled" id="ctxRedoBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"></path><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"></path></svg>
+        <span>Redo</span>
+        <span class="context-shortcut">Ctrl+Y</span>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-item" id="ctxCommentBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path><line x1="9" y1="10" x2="15" y2="10"></line></svg>
+        <span>Toggle Comment</span>
+        <span class="context-shortcut">Ctrl+/</span>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-item" id="ctxIndentBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 17 18 12 13 7"></polyline><polyline points="6 17 11 12 6 7"></polyline></svg>
+        <span>Indent Space</span>
+        <span class="context-shortcut">Tab</span>
+      </div>
+      <div class="context-menu-item" id="ctxDedentBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="11 17 6 12 11 7"></polyline><polyline points="18 17 13 12 18 7"></polyline></svg>
+        <span>Reverse Space</span>
+        <span class="context-shortcut">Shift+Tab</span>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-item" id="ctxFormatBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" y1="10" x2="3" y2="10"></line><line x1="21" y1="6" x2="3" y2="6"></line><line x1="21" y1="14" x2="3" y2="14"></line><line x1="21" y1="18" x2="3" y2="18"></line></svg>
+        <span>Format Code</span>
+        <span class="context-shortcut">Shift+Alt+F</span>
+      </div>
+    </div>
+
+    <!-- Toast Notification Container -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <!-- Real-time Collaborator Mouse Pointers Container -->
+    <div id="mousePointerContainer" class="mouse-pointer-container"></div>
+
+  </div>
+
+  <!-- External Libraries: Socket.io & Prism JS (Local Offline Bundles) -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/vendor/prism/prism.min.js"></script>
+  <script src="/vendor/prism/prism-python.min.js"></script>
+  
+  <!-- Application Logic -->
+  <script src="/app.js?v=68"></script>
+</body>
+</html>
