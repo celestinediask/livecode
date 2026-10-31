@@ -2,7 +2,7 @@
 
 > Real-time collaborative code editor with WebRTC voice communication, Pyodide in-browser Python execution, interactive terminal, and proctoring controls.
 
-<img width="1912" height="930" alt="livecode" src="https://github.com/user-attachments/assets/618877c5-04eb-43eb-bdfa-424c00503c6e" />
+<img width="1913" height="934" alt="image" src="https://github.com/user-attachments/assets/2215feda-f55f-40d5-a271-d5566c8ca100" />
 
 ## Features
 
